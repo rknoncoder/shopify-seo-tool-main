@@ -1,0 +1,14 @@
+{
+  "name": "shopify-seo-tool-backend",
+  "version": "1.0.0",
+  "private": true,
+  "main": "src/testCrawler.js",
+  "scripts": {
+    "crawl:test": "node src/testCrawler.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.9",
+    "cheerio": "^1.0.0",
+    "puppeteer": "^24.40.0"
+  }
+}

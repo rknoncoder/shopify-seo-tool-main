@@ -1,0 +1,64 @@
+<?xml version="1.0"?>
+<?mso-application progid="Excel.Sheet"?>
+<Workbook
+  xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+  xmlns:o="urn:schemas-microsoft-com:office:office"
+  xmlns:x="urn:schemas-microsoft-com:office:excel"
+  xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"
+  xmlns:html="http://www.w3.org/TR/REC-html40">
+  
+    <Worksheet ss:Name="Summary">
+      <Table>
+        <Row><Cell><Data ss:Type="String">Metric</Data></Cell><Cell><Data ss:Type="String">Value</Data></Cell></Row><Row><Cell><Data ss:Type="String">Duplicate Title Groups</Data></Cell><Cell><Data ss:Type="String">0</Data></Cell></Row><Row><Cell><Data ss:Type="String">Duplicate Meta Description Groups</Data></Cell><Cell><Data ss:Type="String">0</Data></Cell></Row><Row><Cell><Data ss:Type="String">Duplicate Content Groups</Data></Cell><Cell><Data ss:Type="String">0</Data></Cell></Row><Row><Cell><Data ss:Type="String">Canonical/Indexability Conflicts</Data></Cell><Cell><Data ss:Type="String">0</Data></Cell></Row><Row><Cell><Data ss:Type="String">Shopify Collection Product Duplicates</Data></Cell><Cell><Data ss:Type="String">0</Data></Cell></Row><Row><Cell><Data ss:Type="String">Structured Data Issues</Data></Cell><Cell><Data ss:Type="String">0</Data></Cell></Row><Row><Cell><Data ss:Type="String">Pages With Structured Data</Data></Cell><Cell><Data ss:Type="String">0</Data></Cell></Row><Row><Cell><Data ss:Type="String">Total Structured Data Items</Data></Cell><Cell><Data ss:Type="String">0</Data></Cell></Row>
+      </Table>
+    </Worksheet>
+  
+    <Worksheet ss:Name="Pages">
+      <Table>
+        <Row><Cell><Data ss:Type="String">URL</Data></Cell><Cell><Data ss:Type="String">Page Type</Data></Cell><Cell><Data ss:Type="String">Score</Data></Cell><Cell><Data ss:Type="String">Title</Data></Cell><Cell><Data ss:Type="String">Meta Description</Data></Cell><Cell><Data ss:Type="String">H1</Data></Cell><Cell><Data ss:Type="String">Canonical</Data></Cell><Cell><Data ss:Type="String">Collection Product URLs</Data></Cell><Cell><Data ss:Type="String">Robots</Data></Cell><Cell><Data ss:Type="String">Noindex</Data></Cell><Cell><Data ss:Type="String">Schema Types</Data></Cell><Cell><Data ss:Type="String">Schema Item Count</Data></Cell><Cell><Data ss:Type="String">Nested Schema Items</Data></Cell><Cell><Data ss:Type="String">Structured Data Confidence</Data></Cell><Cell><Data ss:Type="String">JSON-LD Blocks</Data></Cell><Cell><Data ss:Type="String">Microdata Items</Data></Cell><Cell><Data ss:Type="String">Structured Data Errors</Data></Cell><Cell><Data ss:Type="String">Word Count</Data></Cell><Cell><Data ss:Type="String">Issues</Data></Cell><Cell><Data ss:Type="String">Duplicate Types</Data></Cell><Cell><Data ss:Type="String">Duplicate URLs</Data></Cell><Cell><Data ss:Type="String">Canonical Conflicts</Data></Cell></Row>
+      </Table>
+    </Worksheet>
+  
+    <Worksheet ss:Name="Duplicate Titles">
+      <Table>
+        <Row><Cell><Data ss:Type="String">Title</Data></Cell><Cell><Data ss:Type="String">Affected URLs</Data></Cell><Cell><Data ss:Type="String">URL Count</Data></Cell></Row><Row><Cell><Data ss:Type="String">No duplicate titles found</Data></Cell><Cell><Data ss:Type="String"></Data></Cell><Cell><Data ss:Type="String">0</Data></Cell></Row>
+      </Table>
+    </Worksheet>
+  
+    <Worksheet ss:Name="Duplicate Meta">
+      <Table>
+        <Row><Cell><Data ss:Type="String">Meta Description</Data></Cell><Cell><Data ss:Type="String">Affected URLs</Data></Cell><Cell><Data ss:Type="String">URL Count</Data></Cell></Row><Row><Cell><Data ss:Type="String">No duplicate meta found</Data></Cell><Cell><Data ss:Type="String"></Data></Cell><Cell><Data ss:Type="String">0</Data></Cell></Row>
+      </Table>
+    </Worksheet>
+  
+    <Worksheet ss:Name="Duplicate Content">
+      <Table>
+        <Row><Cell><Data ss:Type="String">Content Fingerprint</Data></Cell><Cell><Data ss:Type="String">Affected URLs</Data></Cell><Cell><Data ss:Type="String">URL Count</Data></Cell></Row><Row><Cell><Data ss:Type="String">No duplicate content found</Data></Cell><Cell><Data ss:Type="String"></Data></Cell><Cell><Data ss:Type="String">0</Data></Cell></Row>
+      </Table>
+    </Worksheet>
+  
+    <Worksheet ss:Name="Canonical Conflicts">
+      <Table>
+        <Row><Cell><Data ss:Type="String">URL</Data></Cell><Cell><Data ss:Type="String">Type</Data></Cell><Cell><Data ss:Type="String">Severity</Data></Cell><Cell><Data ss:Type="String">Message</Data></Cell><Cell><Data ss:Type="String">Canonical Target</Data></Cell><Cell><Data ss:Type="String">Final Target</Data></Cell></Row><Row><Cell><Data ss:Type="String">No canonical or indexability conflicts found</Data></Cell><Cell><Data ss:Type="String"></Data></Cell><Cell><Data ss:Type="String"></Data></Cell><Cell><Data ss:Type="String"></Data></Cell><Cell><Data ss:Type="String"></Data></Cell><Cell><Data ss:Type="String"></Data></Cell></Row>
+      </Table>
+    </Worksheet>
+  
+    <Worksheet ss:Name="Shopify URL Duplicates">
+      <Table>
+        <Row><Cell><Data ss:Type="String">Product URL</Data></Cell><Cell><Data ss:Type="String">Canonical Target</Data></Cell><Cell><Data ss:Type="String">Severity</Data></Cell><Cell><Data ss:Type="String">Message</Data></Cell><Cell><Data ss:Type="String">Collection Duplicate URLs</Data></Cell></Row><Row><Cell><Data ss:Type="String">No Shopify collection-product duplicate URLs found</Data></Cell><Cell><Data ss:Type="String"></Data></Cell><Cell><Data ss:Type="String"></Data></Cell><Cell><Data ss:Type="String"></Data></Cell><Cell><Data ss:Type="String"></Data></Cell></Row>
+      </Table>
+    </Worksheet>
+  
+    <Worksheet ss:Name="Structured Data">
+      <Table>
+        <Row><Cell><Data ss:Type="String">Coverage Metric</Data></Cell><Cell><Data ss:Type="String">Value</Data></Cell></Row><Row><Cell><Data ss:Type="String">Product schema pages</Data></Cell><Cell><Data ss:Type="String">0</Data></Cell></Row><Row><Cell><Data ss:Type="String">ProductGroup schema pages</Data></Cell><Cell><Data ss:Type="String">0</Data></Cell></Row><Row><Cell><Data ss:Type="String">BreadcrumbList schema pages</Data></Cell><Cell><Data ss:Type="String">0</Data></Cell></Row><Row><Cell><Data ss:Type="String">Article schema pages</Data></Cell><Cell><Data ss:Type="String">0</Data></Cell></Row><Row><Cell><Data ss:Type="String">BlogPosting schema pages</Data></Cell><Cell><Data ss:Type="String">0</Data></Cell></Row><Row><Cell><Data ss:Type="String">FAQPage schema pages</Data></Cell><Cell><Data ss:Type="String">0</Data></Cell></Row><Row><Cell><Data ss:Type="String"> </Data></Cell><Cell><Data ss:Type="String"> </Data></Cell></Row><Row><Cell><Data ss:Type="String">URL</Data></Cell><Cell><Data ss:Type="String">Page Type</Data></Cell><Cell><Data ss:Type="String">Severity</Data></Cell><Cell><Data ss:Type="String">Message</Data></Cell><Cell><Data ss:Type="String">Issue Type</Data></Cell><Cell><Data ss:Type="String">Error Count</Data></Cell><Cell><Data ss:Type="String">Recommendation</Data></Cell></Row><Row><Cell><Data ss:Type="String">No structured data issues found</Data></Cell><Cell><Data ss:Type="String"></Data></Cell><Cell><Data ss:Type="String"></Data></Cell><Cell><Data ss:Type="String"></Data></Cell><Cell><Data ss:Type="String"></Data></Cell><Cell><Data ss:Type="String"></Data></Cell><Cell><Data ss:Type="String"></Data></Cell></Row>
+      </Table>
+    </Worksheet>
+  
+    <Worksheet ss:Name="Structured Data SEO">
+      <Table>
+        <Row><Cell><Data ss:Type="String">URL</Data></Cell><Cell><Data ss:Type="String">Detected Schemas</Data></Cell><Cell><Data ss:Type="String">Missing Schemas</Data></Cell><Cell><Data ss:Type="String">Confidence</Data></Cell><Cell><Data ss:Type="String">Structured Data Found</Data></Cell><Cell><Data ss:Type="String">Missing Structured Data</Data></Cell><Cell><Data ss:Type="String">Recommendations</Data></Cell></Row><Row><Cell><Data ss:Type="String">No structured data SEO report items found</Data></Cell><Cell><Data ss:Type="String"></Data></Cell><Cell><Data ss:Type="String"></Data></Cell><Cell><Data ss:Type="String"></Data></Cell><Cell><Data ss:Type="String"></Data></Cell><Cell><Data ss:Type="String"></Data></Cell><Cell><Data ss:Type="String"></Data></Cell></Row>
+      </Table>
+    </Worksheet>
+  
+</Workbook>
