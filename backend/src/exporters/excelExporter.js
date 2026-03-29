@@ -50,6 +50,11 @@ function buildPagesSheet(pages) {
     'Issues',
     'Duplicate Types',
     'Duplicate URLs',
+    'Variant Duplication Canonical',
+    'Variant Duplication URLs',
+    'Variant Duplication Severity',
+    'Variant Duplication Reason',
+    'Variant Grouping Method',
     'Canonical Conflicts'
   ]];
 
@@ -82,6 +87,16 @@ function buildPagesSheet(pages) {
         .flatMap(item => item.urls || [])
         .filter((url, index, all) => all.indexOf(url) === index)
         .join(', '),
+      (page.variantDuplications || [])
+        .map(item => item.canonical)
+        .join(', '),
+      (page.variantDuplications || [])
+        .flatMap(item => item.urls || [])
+        .filter((url, index, all) => all.indexOf(url) === index)
+        .join(', '),
+      (page.variantDuplications || []).map(item => item.severity).join(', '),
+      (page.variantDuplications || []).map(item => item.reason).join(', '),
+      (page.variantDuplications || []).map(item => item.groupedBy).join(', '),
       [
         ...(page.canonicalConflicts || []).map(item => item.message),
         ...(page.shopifyCollectionDuplicates || []).map(item => item.message)
@@ -116,6 +131,7 @@ function buildSummarySheet(summary) {
     ['Duplicate Title Groups', summary.duplicateTitleGroups || 0],
     ['Duplicate Meta Description Groups', summary.duplicateMetaDescriptionGroups || 0],
     ['Duplicate Content Groups', summary.duplicateContentGroups || 0],
+    ['Variant Duplication Groups', summary.variantDuplicationGroups || 0],
     ['Canonical/Indexability Conflicts', summary.canonicalIndexabilityConflicts || 0],
     ['Shopify Collection Product Duplicates', summary.shopifyCollectionProductDuplicateGroups || 0],
     ['Structured Data Issues', summary.structuredDataIssues || 0],
@@ -245,6 +261,40 @@ function buildStructuredDataSeoReportSheet(reportItems) {
   return rows;
 }
 
+function buildVariantDuplicationSheet(items) {
+  const rows = [[
+    'Canonical',
+    'URLs',
+    'URL Count',
+    'Issue',
+    'Severity',
+    'Reason',
+    'Grouping Method',
+    'Pattern Match',
+    'Recommendations'
+  ]];
+
+  items.forEach(item => {
+    rows.push([
+      item.canonical,
+      (item.urls || []).join(', '),
+      item.urlCount || 0,
+      item.issue || '',
+      item.severity || '',
+      item.reason || '',
+      item.groupedBy || '',
+      item.hasPatternMatch ? 'Yes' : 'No',
+      (item.recommendations || []).join(' | ')
+    ]);
+  });
+
+  if (items.length === 0) {
+    rows.push(['No variant duplication found', '', '0', '', '', '', '', '', '']);
+  }
+
+  return rows;
+}
+
 function buildWorkbookXml(report) {
   const worksheets = [
     createWorksheet('Summary', buildSummarySheet(report.summary || {})),
@@ -275,6 +325,10 @@ function buildWorkbookXml(report) {
         'fingerprint',
         'Content Fingerprint'
       )
+    ),
+    createWorksheet(
+      'Variant Duplications',
+      buildVariantDuplicationSheet(report.variantDuplications || [])
     ),
     createWorksheet(
       'Canonical Conflicts',

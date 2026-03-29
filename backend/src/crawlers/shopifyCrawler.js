@@ -128,6 +128,7 @@ class ShopifyCrawler {
     return this.normalizeText($('body').text());
   }
 
+
   createContentFingerprint(text) {
     const normalized = text
       .toLowerCase()

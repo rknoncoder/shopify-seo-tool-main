@@ -1,6 +1,8 @@
 function analyzeSEO(page, sitewideData = {}) {
   const issues = [];
   const duplicateFindings = sitewideData.pageDuplicates?.get(page.url) || [];
+  const variantDuplicationFindings =
+    sitewideData.pageVariantDuplications?.get(page.url) || [];
   const canonicalFindings =
     sitewideData.pageCanonicalConflicts?.get(page.url) || [];
   const shopifyDuplicateFindings =
@@ -57,6 +59,13 @@ function analyzeSEO(page, sitewideData = {}) {
     }
   });
 
+  variantDuplicationFindings.forEach(finding => {
+    const label = finding.severity === 'HIGH' ? 'High:' : 'Warning:';
+    issues.push(
+      `${label} Variant duplication detected across ${finding.urlCount} URL(s) for canonical ${finding.canonical || page.url}. ${finding.reason}`
+    );
+  });
+
   canonicalFindings.forEach(finding => {
     const label = finding.severity === 'critical' ? 'Critical:' : 'Warning:';
     issues.push(`${label} ${finding.message}`);
@@ -92,6 +101,7 @@ function analyzeSEO(page, sitewideData = {}) {
     ...page,
     issues,
     duplicates: duplicateFindings,
+    variantDuplications: variantDuplicationFindings,
     canonicalConflicts: canonicalFindings,
     shopifyCollectionDuplicates: shopifyDuplicateFindings,
     structuredDataFindings,

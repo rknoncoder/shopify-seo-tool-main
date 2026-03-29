@@ -4,7 +4,7 @@ const analyzeSitewideData = require('./analyzers/sitewideAnalyzer');
 const exportAuditToExcel = require('./exporters/excelExporter');
 
 (async () => {
-  const crawlUrl = process.env.AUDIT_URL || 'https://nobero.com';
+  const crawlUrl = process.env.AUDIT_URL || 'https://triprindia.com';
   const crawler = new ShopifyCrawler(crawlUrl);
   const results = await crawler.start();
   const sitewideData = analyzeSitewideData(results);
@@ -15,6 +15,7 @@ const exportAuditToExcel = require('./exporters/excelExporter');
     duplicateTitles: sitewideData.duplicateTitles,
     duplicateMetaDescriptions: sitewideData.duplicateMetaDescriptions,
     duplicateContent: sitewideData.duplicateContent,
+    variantDuplications: sitewideData.variantDuplications,
     structuredDataCoverage: sitewideData.structuredDataCoverage,
     structuredDataFindings: sitewideData.structuredDataFindings,
     canonicalIndexabilityConflicts:

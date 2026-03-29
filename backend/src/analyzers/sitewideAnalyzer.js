@@ -28,6 +28,130 @@ function buildContentGroups(pages) {
     .map(([fingerprint, urls]) => ({ fingerprint, urls }));
 }
 
+function normalizeProductIdentifier(value) {
+  return normalizeField(value)
+    .replace(/[-_\s]+copy\b/g, ' ')
+    .replace(/[-_\s]+\d+\b/g, ' ')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function extractProductHandle(url) {
+  const match = (url || '').match(/\/products\/([^/?#]+)/i);
+  return match ? match[1] : '';
+}
+
+function hasShopifyDuplicateHandlePattern(url) {
+  const handle = extractProductHandle(url);
+  return /(?:-\d+|-copy)$/i.test(handle);
+}
+
+function getVariantDuplicationGroupKey(page) {
+  if (page.canonical) {
+    return {
+      key: normalizeField(page.canonical),
+      canonical: page.canonical,
+      reason: 'Multiple URLs share same canonical',
+      groupedBy: 'canonical'
+    };
+  }
+
+  const normalizedHandle = normalizeProductIdentifier(extractProductHandle(page.url));
+  if (!normalizedHandle) {
+    return null;
+  }
+
+  return {
+    key: normalizedHandle,
+    canonical: '',
+    reason: 'Canonical missing; grouped by normalized URL handle',
+    groupedBy: 'normalizedHandle'
+  };
+}
+
+function analyzeVariantDuplications(pages) {
+  const groups = new Map();
+  const pageFindings = new Map();
+
+  pages.forEach(page => {
+    if (page.pageType !== 'product') {
+      return;
+    }
+
+    const groupKey = getVariantDuplicationGroupKey(page);
+    if (!groupKey) {
+      return;
+    }
+
+    if (!groups.has(groupKey.key)) {
+      groups.set(groupKey.key, {
+        canonical: groupKey.canonical,
+        groupedBy: groupKey.groupedBy,
+        reason: groupKey.reason,
+        urls: new Set()
+      });
+    }
+
+    const group = groups.get(groupKey.key);
+    group.urls.add(page.url);
+
+    if (!group.canonical && groupKey.canonical) {
+      group.canonical = groupKey.canonical;
+    }
+  });
+
+  const findings = Array.from(groups.entries())
+    .map(([, group]) => {
+      const urlList = Array.from(group.urls).sort();
+      return {
+        canonical: group.canonical || urlList[0] || '',
+        urls: urlList,
+        urlCount: urlList.length,
+        groupedBy: group.groupedBy,
+        reason: group.groupedBy === 'canonical'
+          ? 'Multiple URLs share same canonical'
+          : group.reason,
+        hasPatternMatch: urlList.some(url => hasShopifyDuplicateHandlePattern(url))
+      };
+    })
+    .filter(group => group.urlCount > 1)
+    .map(group => ({
+      ...group,
+      issue: 'Multiple URLs for same product',
+      severity: group.urlCount >= 5 ? 'HIGH' : 'MEDIUM',
+      recommendations: [
+        'Use canonical to main product URL',
+        'Avoid duplicate product handles',
+        'Consolidate variants under one product'
+      ]
+    }));
+
+  findings.forEach(finding => {
+    finding.urls.forEach(url => {
+      pageFindings.set(url, [
+        {
+          type: 'variantDuplication',
+          canonical: finding.canonical,
+          urls: finding.urls.filter(candidate => candidate !== url),
+          urlCount: finding.urlCount,
+          groupedBy: finding.groupedBy,
+          reason: finding.reason,
+          hasPatternMatch: finding.hasPatternMatch,
+          severity: finding.severity,
+          issue: finding.issue,
+          recommendations: finding.recommendations
+        }
+      ]);
+    });
+  });
+
+  return {
+    variantDuplications: findings,
+    pageVariantDuplications: pageFindings
+  };
+}
+
 function indexDuplicates(groups, type, valueKey) {
   const index = new Map();
   groups.forEach(group => {
@@ -297,6 +421,7 @@ function analyzeSitewideData(pages) {
   const duplicateTitles = buildDuplicateMap(pages, 'title');
   const duplicateMetaDescriptions = buildDuplicateMap(pages, 'metaDescription');
   const duplicateContent = buildContentGroups(pages);
+  const variantDuplicationAnalysis = analyzeVariantDuplications(pages);
   const canonicalData = analyzeCanonicalAndIndexability(pages);
   const shopifyDuplicateData = analyzeShopifyCollectionProductDuplicates(pages);
   const structuredDataAnalysis = analyzeStructuredData(pages);
@@ -306,6 +431,7 @@ function analyzeSitewideData(pages) {
       duplicateTitleGroups: duplicateTitles.length,
       duplicateMetaDescriptionGroups: duplicateMetaDescriptions.length,
       duplicateContentGroups: duplicateContent.length,
+      variantDuplicationGroups: variantDuplicationAnalysis.variantDuplications.length,
       canonicalIndexabilityConflicts: canonicalData.canonicalIndexabilityConflicts.length,
       shopifyCollectionProductDuplicateGroups: shopifyDuplicateData.shopifyCollectionProductDuplicates.length,
       structuredDataIssues: structuredDataAnalysis.structuredDataFindings.length,
@@ -315,6 +441,7 @@ function analyzeSitewideData(pages) {
     duplicateTitles,
     duplicateMetaDescriptions,
     duplicateContent,
+    variantDuplications: variantDuplicationAnalysis.variantDuplications,
     structuredDataCoverage: structuredDataAnalysis.structuredDataCoverage,
     structuredDataFindings: structuredDataAnalysis.structuredDataFindings,
     canonicalIndexabilityConflicts: canonicalData.canonicalIndexabilityConflicts,
@@ -324,6 +451,7 @@ function analyzeSitewideData(pages) {
       indexDuplicates(duplicateMetaDescriptions, 'metaDescription', 'value'),
       indexDuplicates(duplicateContent, 'content', 'fingerprint')
     ),
+    pageVariantDuplications: variantDuplicationAnalysis.pageVariantDuplications,
     pageCanonicalConflicts: canonicalData.pageCanonicalConflicts,
     pageShopifyCollectionDuplicates: shopifyDuplicateData.pageShopifyCollectionDuplicates,
     pageStructuredDataFindings: structuredDataAnalysis.pageStructuredDataFindings
