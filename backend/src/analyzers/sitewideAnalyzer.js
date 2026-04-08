@@ -1,5 +1,5 @@
 function normalizeField(value) {
-  return (value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  return (value || '').replace(/s+/g, ' ').trim().toLowerCase();
 }
 
 function buildDuplicateMap(pages, field) {
@@ -262,8 +262,14 @@ function getStructuredDataRecommendation(type) {
       'Add Article or BlogPosting schema with headline, author, datePublished, and image.',
     missingBreadcrumbSchema:
       'Add BreadcrumbList schema to help search engines understand page hierarchy.',
-    'breadcrumb-missing-schema':
-      'Add BreadcrumbList schema to match visible breadcrumb navigation and help search engines understand page hierarchy.'
+    breadcrumb_schema_missing:
+      'Add BreadcrumbList schema to match visible breadcrumb navigation and help search engines understand page hierarchy.',
+    breadcrumb_ui_missing:
+      'Render breadcrumb navigation in the page UI so users and search engines see the same hierarchy.',
+    breadcrumb_missing:
+      'Add breadcrumb navigation in the UI and BreadcrumbList schema to clarify page hierarchy.',
+    breadcrumb_mismatch:
+      'Align breadcrumb schema names with the visible breadcrumb UI so search engines and users see the same hierarchy.'
   };
   return recommendationMap[type] || '';
 }
@@ -322,6 +328,7 @@ function analyzeStructuredData(pages) {
         type: issue.type,
         severity: issue.severity,
         message: issue.message,
+        details: issue.details || {},
         recommendation: getStructuredDataRecommendation(issue.type)
       }, findings);
     });
@@ -361,17 +368,6 @@ function analyzeStructuredData(pages) {
         severity: 'warning',
         message: 'Blog page is missing Article or BlogPosting schema',
         recommendation: getStructuredDataRecommendation('missingArticleSchema')
-      }, findings);
-    }
-
-    if ((page.pageType === 'product' || page.pageType === 'collection') &&
-      !schemaTypeSet.has('BreadcrumbList') &&
-      !(structuredData.issues || []).some(issue => issue.type === 'breadcrumb-missing-schema')) {
-      appendStructuredDataFinding(pageFindings, page, {
-        type: 'missingBreadcrumbSchema',
-        severity: 'warning',
-        message: 'Page is missing BreadcrumbList schema',
-        recommendation: getStructuredDataRecommendation('missingBreadcrumbSchema')
       }, findings);
     }
   });

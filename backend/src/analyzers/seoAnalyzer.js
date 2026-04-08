@@ -1,5 +1,12 @@
 const { parseIssues } = require('../utils/issueParser');
 
+const BREADCRUMB_ISSUE_TYPES = new Set([
+  'breadcrumb_schema_missing',
+  'breadcrumb_ui_missing',
+  'breadcrumb_missing',
+  'breadcrumb_mismatch'
+]);
+
 function analyzeSEO(page, sitewideData = {}) {
   const rawIssues = [];
   const duplicateFindings = sitewideData.pageDuplicates?.get(page.url) || [];
@@ -77,7 +84,7 @@ function analyzeSEO(page, sitewideData = {}) {
   });
 
   structuredDataFindings.forEach(finding => {
-    if (finding.severity === 'info') {
+    if (finding.severity === 'info' || BREADCRUMB_ISSUE_TYPES.has(finding.type)) {
       return;
     }
 
@@ -90,15 +97,19 @@ function analyzeSEO(page, sitewideData = {}) {
     rawIssues.push(`${label} ${finding.message}`);
   });
 
-  const issues = parseIssues(rawIssues.join(' | '));
   const structuredDataReport = buildStructuredDataReport(
     page,
     structuredDataFindings
+  );
+  const issues = mergeIssues(
+    parseIssues(rawIssues.join(' | ')),
+    structuredDataReport.issues || []
   );
 
   return {
     ...page,
     schema: structuredDataReport.schema,
+    breadcrumb: structuredDataReport.breadcrumb,
     issues,
     duplicates: duplicateFindings,
     canonicalConflicts: canonicalFindings,
@@ -149,6 +160,12 @@ function buildStructuredDataReport(page, findings) {
 
   return {
     schema,
+    breadcrumb: structuredData.breadcrumb || {
+      ui_present: false,
+      schema_present: false,
+      ui_path: [],
+      schema_path: []
+    },
     detectedSchemas: schema.detected,
     missingSchemas,
     confidence: schema.confidence,
@@ -156,6 +173,39 @@ function buildStructuredDataReport(page, findings) {
     missingStructuredData: missing,
     recommendations: Array.from(new Set(recommendations))
   };
+}
+
+function mergeIssues(parsedIssues = [], structuredIssues = []) {
+  const merged = [];
+  const seen = new Set();
+
+  [...parsedIssues, ...structuredIssues].forEach(issue => {
+    if (!issue || !issue.message) {
+      return;
+    }
+
+    const normalizedIssue = {
+      type: issue.type || 'general_issue',
+      severity: issue.severity || 'warning',
+      message: issue.message,
+      ...(issue.count !== undefined ? { count: issue.count } : {}),
+      ...(issue.details ? { details: issue.details } : {})
+    };
+    const key = JSON.stringify({
+      type: normalizedIssue.type,
+      severity: normalizedIssue.severity,
+      message: normalizedIssue.message,
+      count: normalizedIssue.count,
+      details: normalizedIssue.details || null
+    });
+
+    if (!seen.has(key)) {
+      seen.add(key);
+      merged.push(normalizedIssue);
+    }
+  });
+
+  return merged;
 }
 
 function calculateScore(issues) {

@@ -34,44 +34,97 @@ const SCHEMA_ALIASES = {
 
 function hasBreadcrumbTrailText(text) {
   const normalized = String(text || '')
-    .replace(/\s+/g, ' ')
+    .replace(/s+/g, ' ')
     .trim();
 
   if (!normalized) {
     return false;
   }
 
-  return /(home\s*(>|\/|›|»|→).+\s*(>|\/|›|»|→).+)/i.test(normalized);
+  return /homes*[>/].+[>/].+/i.test(normalized);
 }
 
-function detectBreadcrumbUiFromCheerio($) {
-  const explicitMatches = [
+function normalizeBreadcrumbLabel(value) {
+  return String(value || '')
+    .replace(/s+/g, ' ')
+    .replace(/s*[>/]s*/g, ' ')
+    .trim();
+}
+
+function normalizeBreadcrumbPath(path = []) {
+  return path
+    .map(normalizeBreadcrumbLabel)
+    .filter(Boolean)
+    .filter((label, index, all) => index === 0 || label !== all[index - 1]);
+}
+
+function extractPathFromElement($, element) {
+  const container = $(element);
+  let segments = container
+    .find('li')
+    .map((_, item) => {
+      const label = $(item).find('a, span, [aria-current]').first().text() || $(item).text();
+      return normalizeBreadcrumbLabel(label);
+    })
+    .get()
+    .filter(Boolean);
+
+  if (segments.length < 2) {
+    segments = container
+      .find('a, span, [aria-current]')
+      .map((_, item) => normalizeBreadcrumbLabel($(item).text()))
+      .get()
+      .filter(Boolean);
+  }
+
+  if (segments.length < 2) {
+    const text = normalizeBreadcrumbLabel(container.text());
+    if (hasBreadcrumbTrailText(text)) {
+      segments = text
+        .split(/[>/]/)
+        .map(normalizeBreadcrumbLabel)
+        .filter(Boolean);
+    }
+  }
+
+  return normalizeBreadcrumbPath(segments);
+}
+
+function extractBreadcrumbUIPath($) {
+  const candidates = [];
+  const selectors = [
     'nav[aria-label*="breadcrumb" i]',
     'nav[aria-label*="breadcrumbs" i]',
     '[class*="breadcrumb" i]',
     '[class*="breadcrumbs" i]',
-    '[data-testid*="breadcrumb" i]'
+    '[data-testid*="breadcrumb" i]',
+    'ol'
   ];
 
-  if ($(explicitMatches.join(',')).length > 0) {
-    return true;
-  }
+  $(selectors.join(',')).each((_, element) => {
+    const path = extractPathFromElement($, element);
+    const text = normalizeBreadcrumbLabel($(element).text());
+    const className = $(element).attr('class') || '';
+    const hasListItems = $(element).find('li').length >= 2;
+    const looksLikeBreadcrumb =
+      path.length >= 2 &&
+      (
+        /breadcrumb/i.test(className) ||
+        hasBreadcrumbTrailText(text) ||
+        hasListItems ||
+        path.length <= 6
+      );
 
-  let hasTrail = false;
-
-  $('nav, ol, ul, div').each((_, el) => {
-    const links = $(el).find('a');
-    const text = $(el).text();
-
-    if (links.length >= 3 && hasBreadcrumbTrailText(text)) {
-      hasTrail = true;
-      return false;
+    if (looksLikeBreadcrumb) {
+      candidates.push(path);
     }
-
-    return undefined;
   });
 
-  return hasTrail;
+  return candidates.sort((left, right) => right.length - left.length)[0] || [];
+}
+
+function detectBreadcrumbUI($) {
+  return extractBreadcrumbUIPath($).length > 0;
 }
 
 function resolveSchemaPageType(url, pageType) {
@@ -98,6 +151,17 @@ function normalizeSchemaType(type) {
   }
 
   return rawValue;
+}
+
+function hasSchemaType(value, expectedType) {
+  const normalizedExpected = normalizeSchemaType(expectedType);
+  const typeValue = value?.['@type'];
+
+  if (Array.isArray(typeValue)) {
+    return typeValue.some(type => normalizeSchemaType(type) === normalizedExpected);
+  }
+
+  return normalizeSchemaType(typeValue) === normalizedExpected;
 }
 
 function collectSchemaTypes(value, detected = new Set(), seen = new WeakSet()) {
@@ -128,9 +192,7 @@ function collectSchemaTypes(value, detected = new Set(), seen = new WeakSet()) {
   }
 
   if (Array.isArray(value['@graph'])) {
-    value['@graph'].forEach(item => {
-      collectSchemaTypes(item, detected, seen);
-    });
+    value['@graph'].forEach(item => collectSchemaTypes(item, detected, seen));
   }
 
   Object.entries(value).forEach(([key, child]) => {
@@ -142,6 +204,109 @@ function collectSchemaTypes(value, detected = new Set(), seen = new WeakSet()) {
   });
 
   return detected;
+}
+
+function collectBreadcrumbLists(value, found = [], seen = new WeakSet()) {
+  if (!value) {
+    return found;
+  }
+
+  if (Array.isArray(value)) {
+    value.forEach(item => collectBreadcrumbLists(item, found, seen));
+    return found;
+  }
+
+  if (typeof value !== 'object') {
+    return found;
+  }
+
+  if (seen.has(value)) {
+    return found;
+  }
+
+  seen.add(value);
+
+  if (hasSchemaType(value, 'BreadcrumbList')) {
+    found.push(value);
+  }
+
+  if (Array.isArray(value['@graph'])) {
+    value['@graph'].forEach(item => collectBreadcrumbLists(item, found, seen));
+  }
+
+  Object.entries(value).forEach(([key, child]) => {
+    if (key === '@context' || key === '@graph') {
+      return;
+    }
+
+    collectBreadcrumbLists(child, found, seen);
+  });
+
+  return found;
+}
+
+function extractNameFromBreadcrumbItem(item) {
+  if (!item) {
+    return '';
+  }
+
+  if (typeof item === 'string') {
+    return normalizeBreadcrumbLabel(item);
+  }
+
+  if (typeof item === 'object') {
+    if (item.name) {
+      return normalizeBreadcrumbLabel(item.name);
+    }
+
+    if (item.item && typeof item.item === 'object' && item.item.name) {
+      return normalizeBreadcrumbLabel(item.item.name);
+    }
+
+    if (item.item && typeof item.item === 'string') {
+      try {
+        const parsedUrl = new URL(item.item);
+        const segments = parsedUrl.pathname.split('/').filter(Boolean);
+        return normalizeBreadcrumbLabel(segments[segments.length - 1] || parsedUrl.hostname);
+      } catch (error) {
+        return normalizeBreadcrumbLabel(item.item);
+      }
+    }
+  }
+
+  return '';
+}
+
+function extractBreadcrumbSchemaPath(parsedDocuments = []) {
+  const candidates = [];
+
+  parsedDocuments.forEach(document => {
+    const lists = collectBreadcrumbLists(document);
+
+    lists.forEach(list => {
+      const elements = Array.isArray(list.itemListElement)
+        ? [...list.itemListElement].sort((left, right) => {
+            const leftPosition = Number(left?.position || 0);
+            const rightPosition = Number(right?.position || 0);
+            return leftPosition - rightPosition;
+          })
+        : [];
+
+      const path = normalizeBreadcrumbPath(
+        elements.map(extractNameFromBreadcrumbItem).filter(Boolean)
+      );
+
+      if (path.length > 0) {
+        candidates.push(path);
+      }
+    });
+  });
+
+  return candidates.sort((left, right) => right.length - left.length)[0] || [];
+}
+
+function detectBreadcrumbSchema(parsedDocuments = []) {
+  return extractBreadcrumbSchemaPath(parsedDocuments).length > 0;
 }
 
 function countSchemaObjects(value, seen = new WeakSet()) {
@@ -186,6 +351,7 @@ function countSchemaObjects(value, seen = new WeakSet()) {
 function parseJsonLdScripts(scriptContents = []) {
   const detected = new Set();
   const errors = [];
+  const parsedDocuments = [];
   let parsedScriptCount = 0;
   let schemaObjectCount = 0;
 
@@ -199,6 +365,7 @@ function parseJsonLdScripts(scriptContents = []) {
     try {
       const parsed = JSON.parse(rawContent);
       parsedScriptCount += 1;
+      parsedDocuments.push(parsed);
       collectSchemaTypes(parsed, detected);
       schemaObjectCount += countSchemaObjects(parsed);
     } catch (error) {
@@ -214,6 +381,7 @@ function parseJsonLdScripts(scriptContents = []) {
     parsedScriptCount,
     schemaObjectCount,
     detectedSchemas: Array.from(detected).sort(),
+    parsedDocuments,
     errors
   };
 }
@@ -235,41 +403,125 @@ function buildMissingSchemas(pageType, detectedSchemas) {
   });
 }
 
-function buildBreadcrumbSchemaIssue(detectedSchemas, breadcrumbUiPresent) {
-  if (!breadcrumbUiPresent || detectedSchemas.includes('BreadcrumbList')) {
-    return null;
+function generateBreadcrumbIssues(data, options = {}) {
+  const issues = [];
+  const { requireBreadcrumb = false } = options;
+  const uiPath = normalizeBreadcrumbPath(data.ui_path || []);
+  const schemaPath = normalizeBreadcrumbPath(data.schema_path || []);
+  const uiPresent = Boolean(data.ui_present);
+  const schemaPresent = Boolean(data.schema_present);
+
+  if (!uiPresent && !schemaPresent && !requireBreadcrumb) {
+    return issues;
   }
 
-  return {
-    type: 'breadcrumb-missing-schema',
-    severity: 'high',
-    message: 'Breadcrumb UI found but schema missing'
-  };
+  if (uiPresent && !schemaPresent) {
+    issues.push({
+      type: 'breadcrumb_schema_missing',
+      severity: 'high',
+      message: 'Breadcrumb UI found but schema missing',
+      details: {
+        ui_present: true,
+        schema_present: false,
+        ui_path: uiPath,
+        schema_path: schemaPath
+      }
+    });
+
+    return issues;
+  }
+
+  if (!uiPresent && schemaPresent) {
+    issues.push({
+      type: 'breadcrumb_ui_missing',
+      severity: 'low',
+      message: 'Breadcrumb schema exists but breadcrumb UI is missing',
+      details: {
+        ui_present: false,
+        schema_present: true,
+        ui_path: uiPath,
+        schema_path: schemaPath
+      }
+    });
+
+    return issues;
+  }
+
+  if (!uiPresent && !schemaPresent) {
+    issues.push({
+      type: 'breadcrumb_missing',
+      severity: 'medium',
+      message: 'Both breadcrumb UI and schema are missing',
+      details: {
+        ui_present: false,
+        schema_present: false,
+        ui_path: uiPath,
+        schema_path: schemaPath
+      }
+    });
+
+    return issues;
+  }
+
+  const normalizedUi = uiPath.map(label => label.toLowerCase());
+  const normalizedSchema = schemaPath.map(label => label.toLowerCase());
+
+  if (
+    normalizedUi.length > 0 &&
+    normalizedSchema.length > 0 &&
+    JSON.stringify(normalizedUi) !== JSON.stringify(normalizedSchema)
+  ) {
+    issues.push({
+      type: 'breadcrumb_mismatch',
+      severity: 'medium',
+      message: 'Breadcrumb UI and schema paths do not match',
+      details: {
+        ui_present: true,
+        schema_present: true,
+        ui_path: uiPath,
+        schema_path: schemaPath
+      }
+    });
+  }
+
+  return issues;
 }
 
 function buildStructuredDataResult(
   pageType,
   parseResult,
   source,
-  breadcrumbUiPresent = false
+  breadcrumbData = {
+    ui_present: false,
+    schema_present: false,
+    ui_path: [],
+    schema_path: []
+  }
 ) {
   const missingSchemas = buildMissingSchemas(pageType, parseResult.detectedSchemas);
-  const issues = [];
+  const requireBreadcrumb = ['product', 'collection'].includes(pageType);
+  const breadcrumb = {
+    ui_present: Boolean(breadcrumbData.ui_present),
+    schema_present: Boolean(breadcrumbData.schema_present),
+    ui_path: normalizeBreadcrumbPath(breadcrumbData.ui_path || []),
+    schema_path: normalizeBreadcrumbPath(breadcrumbData.schema_path || [])
+  };
+  const issues = generateBreadcrumbIssues(breadcrumb, { requireBreadcrumb });
   const recommendations = [];
-  const breadcrumbIssue = buildBreadcrumbSchemaIssue(
-    parseResult.detectedSchemas,
-    breadcrumbUiPresent
-  );
 
-  if (breadcrumbIssue) {
-    issues.push(breadcrumbIssue);
+  if (!breadcrumb.schema_present && !missingSchemas.includes('BreadcrumbList')) {
+    missingSchemas.push('BreadcrumbList');
+  }
 
-    if (!missingSchemas.includes('BreadcrumbList')) {
-      missingSchemas.push('BreadcrumbList');
-    }
-
+  if (issues.some(issue => issue.type === 'breadcrumb_schema_missing')) {
     recommendations.push(
       'Add BreadcrumbList schema to match visible breadcrumb navigation and help search engines understand page hierarchy.'
+    );
+  }
+
+  if (issues.some(issue => issue.type === 'breadcrumb_mismatch')) {
+    recommendations.push(
+      'Align breadcrumb schema names with the visible breadcrumb UI so search engines and users see the same hierarchy.'
     );
   }
 
@@ -283,7 +535,7 @@ function buildStructuredDataResult(
     missingSchemas,
     confidence,
     source,
-    breadcrumbUiPresent,
+    breadcrumb,
     issues,
     recommendations,
     scriptCount: parseResult.scriptCount,
@@ -307,13 +559,18 @@ function extractStructuredDataFromHtml(html, pageType) {
     .map((_, el) => $(el).html() || '')
     .get();
   const parseResult = parseJsonLdScripts(scripts);
-  const breadcrumbUiPresent = detectBreadcrumbUiFromCheerio($);
+  const breadcrumb = {
+    ui_present: detectBreadcrumbUI($),
+    schema_present: detectBreadcrumbSchema(parseResult.parsedDocuments),
+    ui_path: extractBreadcrumbUIPath($),
+    schema_path: extractBreadcrumbSchemaPath(parseResult.parsedDocuments)
+  };
 
   return buildStructuredDataResult(
     pageType,
     parseResult,
     'raw-html',
-    breadcrumbUiPresent
+    breadcrumb
   );
 }
 
@@ -342,34 +599,83 @@ async function extractStructuredDataWithPuppeteer(url, pageType) {
     });
 
     const renderedData = await page.evaluate(() => {
-      const scriptContents = Array.from(
-        document.querySelectorAll('script[type="application/ld+json"]')
-      ).map(node => node.textContent || '');
+      const normalizeLabel = value =>
+        String(value || '')
+          .replace(/s+/g, ' ')
+          .replace(/s*[>/]s*/g, ' ')
+          .trim();
 
-      const selectorMatches = document.querySelectorAll(
-        'nav[aria-label*="breadcrumb" i], nav[aria-label*="breadcrumbs" i], [class*="breadcrumb" i], [class*="breadcrumbs" i], [data-testid*="breadcrumb" i]'
-      ).length;
+      const normalizePath = path =>
+        path
+          .map(normalizeLabel)
+          .filter(Boolean)
+          .filter((label, index, all) => index === 0 || label !== all[index - 1]);
 
-      const containers = Array.from(document.querySelectorAll('nav, ol, ul, div'));
-      const breadcrumbTrail = containers.some(node => {
-        const links = node.querySelectorAll('a').length;
-        const text = (node.textContent || '').replace(/\s+/g, ' ').trim();
+      const hasTrailText = text => /homes*[>/].+[>/].+/i.test(text);
 
-        return links >= 3 && /home\s*(>|\/|›|»|→).+\s*(>|\/|›|»|→).+/i.test(text);
-      });
+      const extractPathFromElement = element => {
+        let segments = Array.from(element.querySelectorAll('li')).map(item => {
+          const target = item.querySelector('a, span, [aria-current]') || item;
+          return normalizeLabel(target.textContent || '');
+        }).filter(Boolean);
+
+        if (segments.length < 2) {
+          segments = Array.from(element.querySelectorAll('a, span, [aria-current]'))
+            .map(item => normalizeLabel(item.textContent || ''))
+            .filter(Boolean);
+        }
+
+        if (segments.length < 2) {
+          const text = normalizeLabel(element.textContent || '');
+          if (hasTrailText(text)) {
+            segments = text
+              .split(/[>/]/)
+              .map(normalizeLabel)
+              .filter(Boolean);
+          }
+        }
+
+        return normalizePath(segments);
+      };
+
+      const selectors = [
+        'nav[aria-label*="breadcrumb" i]',
+        'nav[aria-label*="breadcrumbs" i]',
+        '[class*="breadcrumb" i]',
+        '[class*="breadcrumbs" i]',
+        '[data-testid*="breadcrumb" i]',
+        'ol'
+      ];
+
+      const uiCandidates = Array.from(document.querySelectorAll(selectors.join(',')))
+        .map(extractPathFromElement)
+        .filter(path => path.length >= 2)
+        .sort((left, right) => right.length - left.length);
 
       return {
-        scriptContents,
-        breadcrumbUiPresent: selectorMatches > 0 || breadcrumbTrail
+        scriptContents: Array.from(
+          document.querySelectorAll('script[type="application/ld+json"]')
+        ).map(node => node.textContent || ''),
+        breadcrumb: {
+          ui_present: uiCandidates.length > 0,
+          ui_path: uiCandidates[0] || []
+        }
       };
     });
 
     const parseResult = parseJsonLdScripts(renderedData.scriptContents);
+    const breadcrumb = {
+      ui_present: renderedData.breadcrumb.ui_present,
+      ui_path: renderedData.breadcrumb.ui_path,
+      schema_present: detectBreadcrumbSchema(parseResult.parsedDocuments),
+      schema_path: extractBreadcrumbSchemaPath(parseResult.parsedDocuments)
+    };
+
     return buildStructuredDataResult(
       pageType,
       parseResult,
       'puppeteer',
-      renderedData.breadcrumbUiPresent
+      breadcrumb
     );
   } catch (error) {
     return {
@@ -421,7 +727,11 @@ module.exports = {
   normalizeSchemaType,
   parseJsonLdScripts,
   resolveSchemaPageType,
-  detectBreadcrumbUiFromCheerio,
+  detectBreadcrumbUI,
+  detectBreadcrumbSchema,
+  extractBreadcrumbUIPath,
+  extractBreadcrumbSchemaPath,
+  generateBreadcrumbIssues,
   extractStructuredDataFromHtml,
   extractStructuredDataWithPuppeteer,
   extractStructuredDataForPage
