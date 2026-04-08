@@ -12,22 +12,36 @@ class ShopifyCrawler {
     this.results = [];
     this.resultsByUrl = new Map();
     this.urlAliases = new Map();
+    this.canonicalInspectionCache = new Map();
+    this.robotsRulesCache = new Map();
   }
 
-  async fetchPage(url) {
+  async fetchPageResponse(url) {
     try {
       const response = await axios.get(url, {
         headers: {
           'User-Agent': 'Mozilla/5.0 (SEO Audit Bot)'
         },
-        timeout: 10000
+        timeout: 10000,
+        maxRedirects: 5,
+        validateStatus: () => true
       });
 
-      return response.data;
+      return response;
     } catch (error) {
       console.log(`Error fetching ${url}`);
       return null;
     }
+  }
+
+  async fetchPage(url) {
+    const response = await this.fetchPageResponse(url);
+
+    if (!response || response.status >= 400 || typeof response.data !== 'string') {
+      return null;
+    }
+
+    return response.data;
   }
 
   detectShopify(html) {
@@ -109,6 +123,140 @@ class ShopifyCrawler {
     };
   }
 
+  extractHeaderRobotsDirectives(headers = {}) {
+    const headerValue = headers['x-robots-tag'] || headers['X-Robots-Tag'] || '';
+    const directives = String(headerValue)
+      .toLowerCase()
+      .split(',')
+      .map(value => value.trim())
+      .filter(Boolean);
+
+    return {
+      headerRobotsContent: String(headerValue || ''),
+      headerRobotsDirectives: directives,
+      headerIsNoindex: directives.includes('noindex') || directives.includes('none')
+    };
+  }
+
+  extractCanonicalData($) {
+    const canonicalTags = $('link[rel="canonical"]')
+      .map((_, el) => $(el).attr('href') || '')
+      .get()
+      .filter(Boolean);
+
+    return {
+      canonicalTagCount: canonicalTags.length,
+      canonicalTagValues: canonicalTags,
+      canonical: this.resolveUrl(canonicalTags[0] || '')
+    };
+  }
+
+  async fetchRobotsRules(origin) {
+    if (this.robotsRulesCache.has(origin)) {
+      return this.robotsRulesCache.get(origin);
+    }
+
+    const robotsUrl = `${origin.replace(/\/$/, '')}/robots.txt`;
+    const response = await this.fetchPageResponse(robotsUrl);
+    const rules = [];
+
+    if (response && response.status < 400 && typeof response.data === 'string') {
+      let applies = false;
+
+      response.data.split(/\r?\n/).forEach(line => {
+        const cleaned = line.split('#')[0].trim();
+
+        if (!cleaned) {
+          return;
+        }
+
+        const separatorIndex = cleaned.indexOf(':');
+        if (separatorIndex === -1) {
+          return;
+        }
+
+        const directive = cleaned.slice(0, separatorIndex).trim().toLowerCase();
+        const value = cleaned.slice(separatorIndex + 1).trim();
+
+        if (directive === 'user-agent') {
+          const agent = value.toLowerCase();
+          applies = agent === '*' || agent === 'mozilla/5.0 (seo audit bot)'.toLowerCase();
+          return;
+        }
+
+        if (directive === 'disallow' && applies && value) {
+          rules.push(value);
+        }
+      });
+    }
+
+    this.robotsRulesCache.set(origin, rules);
+    return rules;
+  }
+
+  async isBlockedByRobots(url) {
+    try {
+      const parsedUrl = new URL(url);
+      const rules = await this.fetchRobotsRules(parsedUrl.origin);
+
+      return rules.some(rule => {
+        if (rule === '/') {
+          return true;
+        }
+
+        return parsedUrl.pathname.startsWith(rule);
+      });
+    } catch (error) {
+      return false;
+    }
+  }
+
+  async inspectCanonicalTarget(url) {
+    if (!url) {
+      return null;
+    }
+
+    if (this.canonicalInspectionCache.has(url)) {
+      return this.canonicalInspectionCache.get(url);
+    }
+
+    const response = await this.fetchPageResponse(url);
+    if (!response) {
+      return null;
+    }
+
+    const html = typeof response.data === 'string' ? response.data : '';
+    const $ = html ? cheerio.load(html) : null;
+    const robotsData = $ ? this.extractRobotsDirectives($) : {
+      robotsContent: '',
+      robotsDirectives: [],
+      isNoindex: false,
+      isNofollow: false
+    };
+    const headerRobotsData = this.extractHeaderRobotsDirectives(response.headers || {});
+    const canonicalData = $ ? this.extractCanonicalData($) : {
+      canonicalTagCount: 0,
+      canonicalTagValues: [],
+      canonical: ''
+    };
+    const isBlockedByRobots = await this.isBlockedByRobots(url);
+
+    const inspection = {
+      url,
+      status: response.status,
+      canonical: canonicalData.canonical,
+      canonicalTagCount: canonicalData.canonicalTagCount,
+      robotsContent: robotsData.robotsContent,
+      robotsDirectives: robotsData.robotsDirectives,
+      isNoindex: robotsData.isNoindex || headerRobotsData.headerIsNoindex,
+      isBlockedByRobots,
+      headerRobotsContent: headerRobotsData.headerRobotsContent
+    };
+
+    this.canonicalInspectionCache.set(url, inspection);
+    return inspection;
+  }
+
   extractBodyText($) {
     const selectorsToRemove = [
       'script',
@@ -128,7 +276,6 @@ class ShopifyCrawler {
     return this.normalizeText($('body').text());
   }
 
-
   createContentFingerprint(text) {
     const normalized = text
       .toLowerCase()
@@ -147,26 +294,37 @@ class ShopifyCrawler {
       .join(' ');
   }
 
-  async extractSEO($, html, url, pageType) {
+  async extractSEO($, html, url, pageType, headers = {}) {
     const bodyText = this.extractBodyText($);
     const robotsData = this.extractRobotsDirectives($);
+    const headerRobotsData = this.extractHeaderRobotsDirectives(headers);
+    const canonicalData = this.extractCanonicalData($);
     const structuredData = await extractStructuredDataForPage({
       url,
       html,
       pageType
     });
+    const canonicalInspection =
+      canonicalData.canonical && canonicalData.canonical !== url
+        ? await this.inspectCanonicalTarget(canonicalData.canonical)
+        : null;
 
     return {
       title: $('title').text().trim(),
       metaDescription: $('meta[name="description"]').attr('content') || '',
       h1: $('h1').first().text().trim(),
-      canonical: this.resolveUrl($('link[rel="canonical"]').attr('href') || ''),
+      canonical: canonicalData.canonical,
+      canonicalTagCount: canonicalData.canonicalTagCount,
+      canonicalTagValues: canonicalData.canonicalTagValues,
       imagesWithoutAlt: $('img').filter((i, el) => !$(el).attr('alt')).length,
       totalImages: $('img').length,
       bodyText,
       wordCount: bodyText ? bodyText.split(' ').length : 0,
       contentFingerprint: this.createContentFingerprint(bodyText),
       ...robotsData,
+      ...headerRobotsData,
+      isNoindex: robotsData.isNoindex || headerRobotsData.headerIsNoindex,
+      canonicalInspection,
       structuredData
     };
   }
@@ -209,15 +367,23 @@ class ShopifyCrawler {
 
     this.visited.add(normalizedUrl);
 
-    const html = await this.fetchPage(normalizedUrl);
-    if (!html) {
+    const response = await this.fetchPageResponse(normalizedUrl);
+    if (!response || response.status >= 400 || typeof response.data !== 'string') {
+      console.log(`Error fetching ${normalizedUrl}`);
       return;
     }
+    const html = response.data;
 
     const $ = cheerio.load(html);
     const isShopify = this.detectShopify(html);
     const pageType = this.detectPageType(normalizedUrl);
-    const seoData = await this.extractSEO($, html, normalizedUrl, pageType);
+    const seoData = await this.extractSEO(
+      $,
+      html,
+      normalizedUrl,
+      pageType,
+      response.headers || {}
+    );
 
     const pageResult = {
       url: normalizedUrl,

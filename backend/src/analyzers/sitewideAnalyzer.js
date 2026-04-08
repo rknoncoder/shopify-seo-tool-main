@@ -28,130 +28,6 @@ function buildContentGroups(pages) {
     .map(([fingerprint, urls]) => ({ fingerprint, urls }));
 }
 
-function normalizeProductIdentifier(value) {
-  return normalizeField(value)
-    .replace(/[-_\s]+copy\b/g, ' ')
-    .replace(/[-_\s]+\d+\b/g, ' ')
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function extractProductHandle(url) {
-  const match = (url || '').match(/\/products\/([^/?#]+)/i);
-  return match ? match[1] : '';
-}
-
-function hasShopifyDuplicateHandlePattern(url) {
-  const handle = extractProductHandle(url);
-  return /(?:-\d+|-copy)$/i.test(handle);
-}
-
-function getVariantDuplicationGroupKey(page) {
-  if (page.canonical) {
-    return {
-      key: normalizeField(page.canonical),
-      canonical: page.canonical,
-      reason: 'Multiple URLs share same canonical',
-      groupedBy: 'canonical'
-    };
-  }
-
-  const normalizedHandle = normalizeProductIdentifier(extractProductHandle(page.url));
-  if (!normalizedHandle) {
-    return null;
-  }
-
-  return {
-    key: normalizedHandle,
-    canonical: '',
-    reason: 'Canonical missing; grouped by normalized URL handle',
-    groupedBy: 'normalizedHandle'
-  };
-}
-
-function analyzeVariantDuplications(pages) {
-  const groups = new Map();
-  const pageFindings = new Map();
-
-  pages.forEach(page => {
-    if (page.pageType !== 'product') {
-      return;
-    }
-
-    const groupKey = getVariantDuplicationGroupKey(page);
-    if (!groupKey) {
-      return;
-    }
-
-    if (!groups.has(groupKey.key)) {
-      groups.set(groupKey.key, {
-        canonical: groupKey.canonical,
-        groupedBy: groupKey.groupedBy,
-        reason: groupKey.reason,
-        urls: new Set()
-      });
-    }
-
-    const group = groups.get(groupKey.key);
-    group.urls.add(page.url);
-
-    if (!group.canonical && groupKey.canonical) {
-      group.canonical = groupKey.canonical;
-    }
-  });
-
-  const findings = Array.from(groups.entries())
-    .map(([, group]) => {
-      const urlList = Array.from(group.urls).sort();
-      return {
-        canonical: group.canonical || urlList[0] || '',
-        urls: urlList,
-        urlCount: urlList.length,
-        groupedBy: group.groupedBy,
-        reason: group.groupedBy === 'canonical'
-          ? 'Multiple URLs share same canonical'
-          : group.reason,
-        hasPatternMatch: urlList.some(url => hasShopifyDuplicateHandlePattern(url))
-      };
-    })
-    .filter(group => group.urlCount > 1)
-    .map(group => ({
-      ...group,
-      issue: 'Multiple URLs for same product',
-      severity: group.urlCount >= 5 ? 'HIGH' : 'MEDIUM',
-      recommendations: [
-        'Use canonical to main product URL',
-        'Avoid duplicate product handles',
-        'Consolidate variants under one product'
-      ]
-    }));
-
-  findings.forEach(finding => {
-    finding.urls.forEach(url => {
-      pageFindings.set(url, [
-        {
-          type: 'variantDuplication',
-          canonical: finding.canonical,
-          urls: finding.urls.filter(candidate => candidate !== url),
-          urlCount: finding.urlCount,
-          groupedBy: finding.groupedBy,
-          reason: finding.reason,
-          hasPatternMatch: finding.hasPatternMatch,
-          severity: finding.severity,
-          issue: finding.issue,
-          recommendations: finding.recommendations
-        }
-      ]);
-    });
-  });
-
-  return {
-    variantDuplications: findings,
-    pageVariantDuplications: pageFindings
-  };
-}
-
 function indexDuplicates(groups, type, valueKey) {
   const index = new Map();
   groups.forEach(group => {
@@ -187,62 +63,154 @@ function appendFinding(index, url, finding) {
   index.get(url).push(finding);
 }
 
+function createCanonicalFinding(page, details) {
+  return {
+    url: page.url,
+    canonical: page.canonical || '',
+    canonicalTarget: page.canonical || '',
+    issueType: details.issueType,
+    type: details.issueType,
+    severity: details.severity,
+    reason: details.reason,
+    message: details.reason,
+    finalTarget: details.finalTarget || '',
+    statusCode: details.statusCode || ''
+  };
+}
+
+function getCanonicalNextTarget(url, pageMap, inspectionMap) {
+  if (pageMap.has(url)) {
+    return pageMap.get(url).canonical || '';
+  }
+
+  return inspectionMap.get(url)?.canonical || '';
+}
+
 function analyzeCanonicalAndIndexability(pages) {
   const pageMap = buildPageMap(pages);
+  const inspectionMap = new Map(
+    pages
+      .map(page => page.canonicalInspection)
+      .filter(Boolean)
+      .map(inspection => [inspection.url, inspection])
+  );
   const pageConflicts = new Map();
   const conflicts = [];
 
   pages.forEach(page => {
     const canonicalTarget = page.canonical;
-    if (!canonicalTarget) return;
 
-    if (page.isNoindex) {
-      const finding = {
-        type: 'noindexCanonicalConflict',
+    if (!canonicalTarget) {
+      const finding = createCanonicalFinding(page, {
+        issueType: 'missingCanonical',
+        severity: 'medium',
+        reason: 'Missing canonical tag'
+      });
+      conflicts.push(finding);
+      appendFinding(pageConflicts, page.url, finding);
+      return;
+    }
+
+    if ((page.canonicalTagCount || 0) > 1) {
+      const finding = createCanonicalFinding(page, {
+        issueType: 'multipleCanonicalTags',
         severity: 'critical',
-        message: 'Page is noindex but also declares a canonical URL',
-        canonicalTarget
-      };
-      conflicts.push({ url: page.url, ...finding });
+        reason: 'Multiple canonical tags found on the page'
+      });
+      conflicts.push(finding);
       appendFinding(pageConflicts, page.url, finding);
     }
 
-    if (canonicalTarget !== page.url) {
-      const targetPage = pageMap.get(canonicalTarget);
-      if (!targetPage) {
-        const finding = {
-          type: 'canonicalTargetMissing',
-          severity: 'critical',
-          message: 'Canonical points to a URL that was not crawled',
-          canonicalTarget
-        };
-        conflicts.push({ url: page.url, ...finding });
-        appendFinding(pageConflicts, page.url, finding);
-        return;
+    if (page.isNoindex) {
+      const finding = createCanonicalFinding(page, {
+        issueType: 'noindexCanonicalConflict',
+        severity: 'critical',
+        reason: 'Page is noindex but also declares a canonical URL'
+      });
+      conflicts.push(finding);
+      appendFinding(pageConflicts, page.url, finding);
+    }
+
+    if (canonicalTarget === page.url) {
+      return;
+    }
+
+    const inspection = page.canonicalInspection;
+    if (inspection && inspection.status && inspection.status !== 200) {
+      const finding = createCanonicalFinding(page, {
+        issueType: 'brokenCanonical',
+        severity: 'critical',
+        reason: 'Canonical points to non-200 page',
+        statusCode: inspection.status
+      });
+      conflicts.push(finding);
+      appendFinding(pageConflicts, page.url, finding);
+    }
+
+    const targetPage = pageMap.get(canonicalTarget);
+    const targetIsNoindex = Boolean(
+      targetPage?.isNoindex || inspection?.isNoindex
+    );
+    const targetIsBlockedByRobots = Boolean(inspection?.isBlockedByRobots);
+
+    if (targetIsNoindex || targetIsBlockedByRobots) {
+      const finding = createCanonicalFinding(page, {
+        issueType: 'canonicalToNonIndexable',
+        severity: 'critical',
+        reason: 'Canonical points to non-indexable page'
+      });
+      conflicts.push(finding);
+      appendFinding(pageConflicts, page.url, finding);
+    }
+
+    const seen = new Set([page.url]);
+    let currentTarget = canonicalTarget;
+    let finalTarget = '';
+    let loopDetected = false;
+
+    while (currentTarget) {
+      if (seen.has(currentTarget)) {
+        loopDetected = true;
+        finalTarget = currentTarget;
+        break;
       }
 
-      if (targetPage.isNoindex) {
-        const finding = {
-          type: 'canonicalToNoindex',
-          severity: 'critical',
-          message: 'Canonical points to a page marked noindex',
-          canonicalTarget
-        };
-        conflicts.push({ url: page.url, ...finding });
-        appendFinding(pageConflicts, page.url, finding);
+      seen.add(currentTarget);
+      const nextTarget = getCanonicalNextTarget(
+        currentTarget,
+        pageMap,
+        inspectionMap
+      );
+
+      if (!nextTarget || nextTarget === currentTarget) {
+        finalTarget = currentTarget;
+        break;
       }
 
-      if (targetPage.canonical && targetPage.canonical !== canonicalTarget) {
-        const finding = {
-          type: 'canonicalChain',
-          severity: 'warning',
-          message: 'Canonical target points somewhere else, creating a canonical chain',
-          canonicalTarget,
-          finalTarget: targetPage.canonical
-        };
-        conflicts.push({ url: page.url, ...finding });
-        appendFinding(pageConflicts, page.url, finding);
-      }
+      currentTarget = nextTarget;
+    }
+
+    if (loopDetected) {
+      const finding = createCanonicalFinding(page, {
+        issueType: 'canonicalLoop',
+        severity: 'high',
+        reason: 'Canonical loop',
+        finalTarget
+      });
+      conflicts.push(finding);
+      appendFinding(pageConflicts, page.url, finding);
+      return;
+    }
+
+    if (finalTarget && finalTarget !== canonicalTarget) {
+      const finding = createCanonicalFinding(page, {
+        issueType: 'canonicalChain',
+        severity: 'high',
+        reason: 'Canonical chain detected',
+        finalTarget
+      });
+      conflicts.push(finding);
+      appendFinding(pageConflicts, page.url, finding);
     }
   });
 
@@ -421,7 +389,6 @@ function analyzeSitewideData(pages) {
   const duplicateTitles = buildDuplicateMap(pages, 'title');
   const duplicateMetaDescriptions = buildDuplicateMap(pages, 'metaDescription');
   const duplicateContent = buildContentGroups(pages);
-  const variantDuplicationAnalysis = analyzeVariantDuplications(pages);
   const canonicalData = analyzeCanonicalAndIndexability(pages);
   const shopifyDuplicateData = analyzeShopifyCollectionProductDuplicates(pages);
   const structuredDataAnalysis = analyzeStructuredData(pages);
@@ -431,7 +398,6 @@ function analyzeSitewideData(pages) {
       duplicateTitleGroups: duplicateTitles.length,
       duplicateMetaDescriptionGroups: duplicateMetaDescriptions.length,
       duplicateContentGroups: duplicateContent.length,
-      variantDuplicationGroups: variantDuplicationAnalysis.variantDuplications.length,
       canonicalIndexabilityConflicts: canonicalData.canonicalIndexabilityConflicts.length,
       shopifyCollectionProductDuplicateGroups: shopifyDuplicateData.shopifyCollectionProductDuplicates.length,
       structuredDataIssues: structuredDataAnalysis.structuredDataFindings.length,
@@ -441,7 +407,6 @@ function analyzeSitewideData(pages) {
     duplicateTitles,
     duplicateMetaDescriptions,
     duplicateContent,
-    variantDuplications: variantDuplicationAnalysis.variantDuplications,
     structuredDataCoverage: structuredDataAnalysis.structuredDataCoverage,
     structuredDataFindings: structuredDataAnalysis.structuredDataFindings,
     canonicalIndexabilityConflicts: canonicalData.canonicalIndexabilityConflicts,
@@ -451,7 +416,6 @@ function analyzeSitewideData(pages) {
       indexDuplicates(duplicateMetaDescriptions, 'metaDescription', 'value'),
       indexDuplicates(duplicateContent, 'content', 'fingerprint')
     ),
-    pageVariantDuplications: variantDuplicationAnalysis.pageVariantDuplications,
     pageCanonicalConflicts: canonicalData.pageCanonicalConflicts,
     pageShopifyCollectionDuplicates: shopifyDuplicateData.pageShopifyCollectionDuplicates,
     pageStructuredDataFindings: structuredDataAnalysis.pageStructuredDataFindings

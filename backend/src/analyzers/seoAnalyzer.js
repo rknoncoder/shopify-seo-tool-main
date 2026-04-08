@@ -1,8 +1,8 @@
+const { parseIssues } = require('../utils/issueParser');
+
 function analyzeSEO(page, sitewideData = {}) {
-  const issues = [];
+  const rawIssues = [];
   const duplicateFindings = sitewideData.pageDuplicates?.get(page.url) || [];
-  const variantDuplicationFindings =
-    sitewideData.pageVariantDuplications?.get(page.url) || [];
   const canonicalFindings =
     sitewideData.pageCanonicalConflicts?.get(page.url) || [];
   const shopifyDuplicateFindings =
@@ -11,69 +11,67 @@ function analyzeSEO(page, sitewideData = {}) {
     sitewideData.pageStructuredDataFindings?.get(page.url) || [];
 
   if (!page.title) {
-    issues.push('Missing title');
+    rawIssues.push('Missing title');
   } else if (page.title.length < 30 || page.title.length > 60) {
-    issues.push(`Warning: Title length issue (${page.title.length} chars)`);
+    rawIssues.push(`Warning: Title length issue (${page.title.length} chars)`);
   }
 
   if (!page.metaDescription) {
-    issues.push('Missing meta description');
+    rawIssues.push('Missing meta description');
   } else if (
     page.metaDescription.length < 70 ||
     page.metaDescription.length > 160
   ) {
-    issues.push(
+    rawIssues.push(
       `Warning: Meta description length issue (${page.metaDescription.length} chars)`
     );
   }
 
   if (!page.h1) {
-    issues.push('Missing H1');
+    rawIssues.push('Missing H1');
   }
 
   if (page.imagesWithoutAlt > 0) {
-    issues.push(`Warning: ${page.imagesWithoutAlt} images missing alt text`);
+    rawIssues.push(`Warning: ${page.imagesWithoutAlt} images missing alt text`);
   }
 
   if (page.totalImages > 100) {
-    issues.push(`Warning: Too many images (${page.totalImages})`);
+    rawIssues.push(`Warning: Too many images (${page.totalImages})`);
   }
 
   duplicateFindings.forEach(finding => {
     if (finding.type === 'title') {
-      issues.push(
+      rawIssues.push(
         `Critical: Duplicate title shared with ${finding.urls.length} other page(s)`
       );
     }
 
     if (finding.type === 'metaDescription') {
-      issues.push(
+      rawIssues.push(
         `Warning: Duplicate meta description shared with ${finding.urls.length} other page(s)`
       );
     }
 
     if (finding.type === 'content') {
-      issues.push(
+      rawIssues.push(
         `Critical: Duplicate body content pattern shared with ${finding.urls.length} other page(s)`
       );
     }
   });
 
-  variantDuplicationFindings.forEach(finding => {
-    const label = finding.severity === 'HIGH' ? 'High:' : 'Warning:';
-    issues.push(
-      `${label} Variant duplication detected across ${finding.urlCount} URL(s) for canonical ${finding.canonical || page.url}. ${finding.reason}`
-    );
-  });
-
   canonicalFindings.forEach(finding => {
-    const label = finding.severity === 'critical' ? 'Critical:' : 'Warning:';
-    issues.push(`${label} ${finding.message}`);
+    const label =
+      finding.severity === 'critical'
+        ? 'Critical:'
+        : finding.severity === 'high'
+          ? 'High:'
+          : 'Warning:';
+    rawIssues.push(`${label} ${finding.message}`);
   });
 
   shopifyDuplicateFindings.forEach(finding => {
     const label = finding.severity === 'critical' ? 'Critical:' : 'Warning:';
-    issues.push(
+    rawIssues.push(
       `${label} ${finding.message} (${finding.duplicateUrls.length} collection URL(s))`
     );
   });
@@ -89,9 +87,10 @@ function analyzeSEO(page, sitewideData = {}) {
         : finding.severity === 'high'
           ? 'High:'
           : 'Warning:';
-    issues.push(`${label} ${finding.message}`);
+    rawIssues.push(`${label} ${finding.message}`);
   });
 
+  const issues = parseIssues(rawIssues.join(' | '));
   const structuredDataReport = buildStructuredDataReport(
     page,
     structuredDataFindings
@@ -99,40 +98,34 @@ function analyzeSEO(page, sitewideData = {}) {
 
   return {
     ...page,
+    schema: structuredDataReport.schema,
     issues,
     duplicates: duplicateFindings,
-    variantDuplications: variantDuplicationFindings,
     canonicalConflicts: canonicalFindings,
     shopifyCollectionDuplicates: shopifyDuplicateFindings,
     structuredDataFindings,
     structuredDataReport,
-    score: calculateScore(issues)
+    score: calculateScore(issues),
+    rawIssues
+  };
+}
+
+function buildSchemaSummary(page) {
+  const structuredData = page.structuredData || {};
+
+  return {
+    detected: structuredData.schemaTypes || [],
+    count: structuredData.totalDetectedItems ?? 0,
+    confidence: structuredData.confidence || 'low'
   };
 }
 
 function buildStructuredDataReport(page, findings) {
   const structuredData = page.structuredData || {};
-  const found = [];
   const missing = [];
   const recommendations = [];
-  const detectedSchemas = structuredData.schemaTypes || [];
+  const schema = buildSchemaSummary(page);
   const missingSchemas = structuredData.missingSchemas || [];
-
-  if (structuredData.hasStructuredData) {
-    found.push(
-      `Structured data found with ${structuredData.totalDetectedItems || 0} item(s)`
-    );
-  }
-
-  if (detectedSchemas.length > 0) {
-    found.push(`Schema types: ${detectedSchemas.join(', ')}`);
-  }
-
-  if (structuredData.breadcrumbUiPresent) {
-    found.push('Visible breadcrumb UI detected');
-  }
-
-  found.push(`Confidence level: ${structuredData.confidence || 'low'}`);
 
   findings.forEach(finding => {
     if (finding.type.startsWith('missing')) {
@@ -155,11 +148,11 @@ function buildStructuredDataReport(page, findings) {
   });
 
   return {
-    detectedSchemas,
+    schema,
+    detectedSchemas: schema.detected,
     missingSchemas,
-    confidence: structuredData.confidence || 'low',
+    confidence: schema.confidence,
     issues: structuredData.issues || [],
-    structuredDataFound: found,
     missingStructuredData: missing,
     recommendations: Array.from(new Set(recommendations))
   };
@@ -169,15 +162,15 @@ function calculateScore(issues) {
   let score = 100;
 
   issues.forEach(issue => {
-    if (issue.startsWith('Critical:') || issue.startsWith('Missing')) {
+    if (issue.severity === 'critical') {
       score -= 20;
     }
 
-    if (issue.startsWith('High:')) {
+    if (issue.severity === 'high') {
       score -= 15;
     }
 
-    if (issue.startsWith('Warning:')) {
+    if (issue.severity === 'warning') {
       score -= 10;
     }
   });

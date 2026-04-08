@@ -15,7 +15,6 @@ const exportAuditToExcel = require('./exporters/excelExporter');
     duplicateTitles: sitewideData.duplicateTitles,
     duplicateMetaDescriptions: sitewideData.duplicateMetaDescriptions,
     duplicateContent: sitewideData.duplicateContent,
-    variantDuplications: sitewideData.variantDuplications,
     structuredDataCoverage: sitewideData.structuredDataCoverage,
     structuredDataFindings: sitewideData.structuredDataFindings,
     canonicalIndexabilityConflicts:
@@ -26,11 +25,11 @@ const exportAuditToExcel = require('./exporters/excelExporter');
 
   report.structuredDataSeoReport = analyzed.map(page => ({
     url: page.url,
+    schema: page.structuredDataReport.schema,
     detectedSchemas: page.structuredDataReport.detectedSchemas,
     missingSchemas: page.structuredDataReport.missingSchemas,
     confidence: page.structuredDataReport.confidence,
     issues: page.structuredDataReport.issues,
-    structuredDataFound: page.structuredDataReport.structuredDataFound,
     missingStructuredData: page.structuredDataReport.missingStructuredData,
     recommendations: page.structuredDataReport.recommendations
   }));
