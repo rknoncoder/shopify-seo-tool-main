@@ -1,12 +1,5 @@
 const { parseIssues } = require('../utils/issueParser');
 
-const BREADCRUMB_ISSUE_TYPES = new Set([
-  'breadcrumb_schema_missing',
-  'breadcrumb_ui_missing',
-  'breadcrumb_missing',
-  'breadcrumb_mismatch'
-]);
-
 function analyzeSEO(page, sitewideData = {}) {
   const rawIssues = [];
   const duplicateFindings = sitewideData.pageDuplicates?.get(page.url) || [];
@@ -84,7 +77,7 @@ function analyzeSEO(page, sitewideData = {}) {
   });
 
   structuredDataFindings.forEach(finding => {
-    if (finding.severity === 'info' || BREADCRUMB_ISSUE_TYPES.has(finding.type)) {
+    if (finding.severity === 'info') {
       return;
     }
 
@@ -97,19 +90,16 @@ function analyzeSEO(page, sitewideData = {}) {
     rawIssues.push(`${label} ${finding.message}`);
   });
 
+  const issues = parseIssues(rawIssues.join(' | '));
   const structuredDataReport = buildStructuredDataReport(
     page,
     structuredDataFindings
-  );
-  const issues = mergeIssues(
-    parseIssues(rawIssues.join(' | ')),
-    structuredDataReport.issues || []
   );
 
   return {
     ...page,
     schema: structuredDataReport.schema,
-    breadcrumb: structuredDataReport.breadcrumb,
+    schemaAudit: structuredDataReport.schemaAudit,
     issues,
     duplicates: duplicateFindings,
     canonicalConflicts: canonicalFindings,
@@ -121,13 +111,53 @@ function analyzeSEO(page, sitewideData = {}) {
   };
 }
 
-function buildSchemaSummary(page) {
-  const structuredData = page.structuredData || {};
+function parseSchemaFromLegacyFound(found = []) {
+  const legacyItems = Array.isArray(found) ? found : [];
+  const detected = new Set();
+  let count;
+  let confidence;
+
+  legacyItems.forEach(item => {
+    const text = String(item || '').trim();
+
+    const countMatch = text.match(/structured data found with\s+(\d+)\s+item/i);
+    if (countMatch) {
+      count = Number(countMatch[1]);
+    }
+
+    const typeMatch = text.match(/^schema types:\s*(.+)$/i);
+    if (typeMatch) {
+      typeMatch[1]
+        .split(',')
+        .map(value => value.trim())
+        .filter(Boolean)
+        .forEach(value => detected.add(value));
+    }
+
+    const confidenceMatch = text.match(/^confidence level:\s*(.+)$/i);
+    if (confidenceMatch) {
+      confidence = confidenceMatch[1].trim().toLowerCase();
+    }
+  });
 
   return {
-    detected: structuredData.schemaTypes || [],
-    count: structuredData.totalDetectedItems ?? 0,
-    confidence: structuredData.confidence || 'low'
+    detected: Array.from(detected),
+    count,
+    confidence
+  };
+}
+
+function buildSchemaSummary(page) {
+  const structuredData = page.structuredData || {};
+  const legacy = parseSchemaFromLegacyFound(structuredData.structuredDataFound);
+  const detected = structuredData.schemaTypes || legacy.detected || [];
+  const count = structuredData.totalDetectedItems ?? legacy.count ?? 0;
+  const confidence = structuredData.confidence || legacy.confidence || 'low';
+
+  return {
+    detected,
+    count,
+    confidence
   };
 }
 
@@ -137,6 +167,7 @@ function buildStructuredDataReport(page, findings) {
   const recommendations = [];
   const schema = buildSchemaSummary(page);
   const missingSchemas = structuredData.missingSchemas || [];
+  const schemaAudit = structuredData.schemaAudit || { rows: [] };
 
   findings.forEach(finding => {
     if (finding.type.startsWith('missing')) {
@@ -158,14 +189,15 @@ function buildStructuredDataReport(page, findings) {
     recommendations.push(recommendation);
   });
 
+  (schemaAudit.rows || []).forEach(row => {
+    if (row.status === 'Warning' || row.status === 'Error') {
+      recommendations.push(row.recommendation);
+    }
+  });
+
   return {
     schema,
-    breadcrumb: structuredData.breadcrumb || {
-      ui_present: false,
-      schema_present: false,
-      ui_path: [],
-      schema_path: []
-    },
+    schemaAudit,
     detectedSchemas: schema.detected,
     missingSchemas,
     confidence: schema.confidence,
@@ -173,39 +205,6 @@ function buildStructuredDataReport(page, findings) {
     missingStructuredData: missing,
     recommendations: Array.from(new Set(recommendations))
   };
-}
-
-function mergeIssues(parsedIssues = [], structuredIssues = []) {
-  const merged = [];
-  const seen = new Set();
-
-  [...parsedIssues, ...structuredIssues].forEach(issue => {
-    if (!issue || !issue.message) {
-      return;
-    }
-
-    const normalizedIssue = {
-      type: issue.type || 'general_issue',
-      severity: issue.severity || 'warning',
-      message: issue.message,
-      ...(issue.count !== undefined ? { count: issue.count } : {}),
-      ...(issue.details ? { details: issue.details } : {})
-    };
-    const key = JSON.stringify({
-      type: normalizedIssue.type,
-      severity: normalizedIssue.severity,
-      message: normalizedIssue.message,
-      count: normalizedIssue.count,
-      details: normalizedIssue.details || null
-    });
-
-    if (!seen.has(key)) {
-      seen.add(key);
-      merged.push(normalizedIssue);
-    }
-  });
-
-  return merged;
 }
 
 function calculateScore(issues) {

@@ -4,7 +4,7 @@ const analyzeSitewideData = require('./analyzers/sitewideAnalyzer');
 const exportAuditToExcel = require('./exporters/excelExporter');
 
 (async () => {
-  const crawlUrl = process.env.AUDIT_URL || 'https://nobero.com';
+  const crawlUrl = process.env.AUDIT_URL || 'https://triprindia.com';
   const crawler = new ShopifyCrawler(crawlUrl);
   const results = await crawler.start();
   const sitewideData = analyzeSitewideData(results);
@@ -26,6 +26,7 @@ const exportAuditToExcel = require('./exporters/excelExporter');
   report.structuredDataSeoReport = analyzed.map(page => ({
     url: page.url,
     schema: page.structuredDataReport.schema,
+    schemaAudit: page.structuredDataReport.schemaAudit,
     detectedSchemas: page.structuredDataReport.detectedSchemas,
     missingSchemas: page.structuredDataReport.missingSchemas,
     confidence: page.structuredDataReport.confidence,

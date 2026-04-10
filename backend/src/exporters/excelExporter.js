@@ -50,6 +50,10 @@ function getPageSchema(page) {
   };
 }
 
+function getSchemaAuditRows(page) {
+  return page.schemaAudit?.rows || page.structuredDataReport?.schemaAudit?.rows || [];
+}
+
 function buildSummaryRows(summary) {
   return [
     ['SEO Audit Summary', ''],
@@ -81,8 +85,14 @@ function buildPageRows(pages) {
     'Schema Types',
     'Schema Item Count',
     'Schema Confidence',
+    'Schema Audit Types',
+    'Schema Audit Statuses',
+    'Schema Audit Warnings',
+    'Schema Audit Recommendations',
     'JSON-LD Scripts',
     'Parsed JSON-LD Scripts',
+    'Microdata Items',
+    'Implementation Type',
     'Structured Data Errors',
     'Word Count',
     'Issues',
@@ -94,6 +104,7 @@ function buildPageRows(pages) {
   pages.forEach(page => {
     const schema = getPageSchema(page);
     const structuredData = page.structuredData || {};
+    const schemaAuditRows = getSchemaAuditRows(page);
 
     rows.push([
       page.url,
@@ -112,8 +123,17 @@ function buildPageRows(pages) {
       (schema.detected || []).join(', '),
       schema.count || 0,
       schema.confidence || 'low',
+      schemaAuditRows.map(item => item.type).join(' | '),
+      schemaAuditRows.map(item => item.status).join(' | '),
+      schemaAuditRows
+        .map(item => item.warnings || '')
+        .filter(Boolean)
+        .join(' | '),
+      schemaAuditRows.map(item => item.recommendation).join(' | '),
       structuredData.scriptCount || 0,
       structuredData.parsedScriptCount || 0,
+      structuredData.microdataItemCount || 0,
+      structuredData.schemaAudit?.implementationType || '',
       (structuredData.jsonLdErrors || [])
         .map(item => item.message)
         .join(' | '),
