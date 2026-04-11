@@ -100,6 +100,7 @@ function analyzeSEO(page, sitewideData = {}) {
     ...page,
     schema: structuredDataReport.schema,
     schemaAudit: structuredDataReport.schemaAudit,
+    generatedSchemaSample: structuredDataReport.generatedSchemaSample,
     issues,
     duplicates: duplicateFindings,
     canonicalConflicts: canonicalFindings,
@@ -198,6 +199,7 @@ function buildStructuredDataReport(page, findings) {
   return {
     schema,
     schemaAudit,
+    generatedSchemaSample: structuredData.generatedSchemaSample || '',
     detectedSchemas: schema.detected,
     missingSchemas,
     confidence: schema.confidence,

@@ -66,6 +66,48 @@ function extractVisiblePrice($) {
   return fallbackMatch ? normalizePrice(fallbackMatch[1]) : '';
 }
 
+function toBreadcrumbLabel(segment) {
+  return decodeURIComponent(String(segment || ''))
+    .replace(/[-_]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, char => char.toUpperCase());
+}
+
+function buildBreadcrumbListSample(pageUrl) {
+  try {
+    const parsedUrl = new URL(pageUrl);
+    const segments = parsedUrl.pathname.split('/').filter(Boolean);
+    const itemListElement = [
+      {
+        '@type': 'ListItem',
+        position: 1,
+        name: 'Home',
+        item: parsedUrl.origin + '/'
+      }
+    ];
+
+    let cumulativePath = '';
+    segments.forEach((segment, index) => {
+      cumulativePath += '/' + segment;
+      itemListElement.push({
+        '@type': 'ListItem',
+        position: index + 2,
+        name: toBreadcrumbLabel(segment),
+        item: parsedUrl.origin + cumulativePath
+      });
+    });
+
+    return JSON.stringify({
+      '@context': 'https://schema.org',
+      '@type': 'BreadcrumbList',
+      itemListElement
+    }, null, 2);
+  } catch (error) {
+    return '';
+  }
+}
+
 function hasBreadcrumbTrailText(text) {
   const normalized = String(text || '')
     .replace(/\s+/g, ' ')
@@ -288,6 +330,7 @@ function buildStructuredDataResult(
   pageType,
   parseResult,
   source,
+  pageUrl,
   breadcrumbUiPresent = false,
   microdataItems = [],
   visiblePrice = ''
@@ -306,6 +349,9 @@ function buildStructuredDataResult(
     combinedDetectedSchemas,
     breadcrumbUiPresent
   );
+  const generatedSchemaSample = breadcrumbIssue
+    ? buildBreadcrumbListSample(pageUrl)
+    : '';
 
   if (breadcrumbIssue) {
     issues.push(breadcrumbIssue);
@@ -350,6 +396,7 @@ function buildStructuredDataResult(
     microdataTypes,
     microdataItemCount: microdataItems.length,
     schemaAudit,
+    generatedSchemaSample,
     visiblePrice: normalizePrice(visiblePrice) || '',
     totalDetectedItems:
       parseResult.schemaObjectCount + microdataItems.length > 0
@@ -360,7 +407,7 @@ function buildStructuredDataResult(
   };
 }
 
-function extractStructuredDataFromHtml(html, pageType) {
+function extractStructuredDataFromHtml(html, pageType, pageUrl = '') {
   const $ = cheerio.load(html);
   const scripts = $('script[type="application/ld+json"]')
     .map((_, el) => $(el).html() || '')
@@ -374,6 +421,7 @@ function extractStructuredDataFromHtml(html, pageType) {
     pageType,
     parseResult,
     'raw-html',
+    pageUrl,
     breadcrumbUiPresent,
     microdataItems,
     visiblePrice
@@ -465,6 +513,7 @@ async function extractStructuredDataWithPuppeteer(url, pageType) {
       pageType,
       parseResult,
       'puppeteer',
+      url,
       renderedData.breadcrumbUiPresent,
       renderedMicrodataItems,
       normalizePrice(renderedData.visiblePrice) || ''
@@ -482,7 +531,7 @@ async function extractStructuredDataWithPuppeteer(url, pageType) {
 
 async function extractStructuredDataForPage({ url, html, pageType }) {
   const effectivePageType = resolveSchemaPageType(url, pageType);
-  const rawResult = extractStructuredDataFromHtml(html, effectivePageType);
+  const rawResult = extractStructuredDataFromHtml(html, effectivePageType, url);
 
   console.log(
     `[structured-data:raw] ${url} pageType=${effectivePageType} scripts=${rawResult.scriptCount} parsed=${rawResult.parsedScriptCount} types=${rawResult.detectedSchemas.join(', ') || 'none'}`
@@ -526,5 +575,6 @@ module.exports = {
   detectBreadcrumbUiFromCheerio,
   extractStructuredDataFromHtml,
   extractStructuredDataWithPuppeteer,
-  extractStructuredDataForPage
+  extractStructuredDataForPage,
+  buildBreadcrumbListSample
 };

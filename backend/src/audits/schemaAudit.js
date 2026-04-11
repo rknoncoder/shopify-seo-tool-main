@@ -68,6 +68,43 @@ function collectEntitiesByTypes(
   return entities;
 }
 
+function collectAllSchemaTypes(value, detected = new Set(), seen = new WeakSet()) {
+  if (!value) {
+    return detected;
+  }
+
+  if (Array.isArray(value)) {
+    value.forEach(item => collectAllSchemaTypes(item, detected, seen));
+    return detected;
+  }
+
+  if (typeof value !== 'object') {
+    return detected;
+  }
+
+  if (seen.has(value)) {
+    return detected;
+  }
+
+  seen.add(value);
+
+  getNormalizedTypeList(value).forEach(type => detected.add(type));
+
+  if (Array.isArray(value['@graph'])) {
+    value['@graph'].forEach(item => collectAllSchemaTypes(item, detected, seen));
+  }
+
+  Object.entries(value).forEach(([key, child]) => {
+    if (key === '@context' || key === '@graph') {
+      return;
+    }
+
+    collectAllSchemaTypes(child, detected, seen);
+  });
+
+  return detected;
+}
+
 function normalizeMicrodataType(itemType) {
   return normalizeSchemaType(String(itemType || '').split(/\s+/)[0]);
 }
@@ -500,6 +537,96 @@ function buildOrganizationConnectionRow(
   };
 }
 
+function getVariantIdentity(entity) {
+  if (!entity || typeof entity !== 'object') {
+    return '';
+  }
+
+  return String(
+    entity['@id'] || entity.sku || entity.url || entity.name || ''
+  ).trim();
+}
+
+function getHasVariantIdentities(productGroupEntity) {
+  const hasVariant = productGroupEntity?.hasVariant;
+  const values = Array.isArray(hasVariant)
+    ? hasVariant
+    : hasVariant
+      ? [hasVariant]
+      : [];
+
+  return values
+    .map(value => {
+      if (!value) {
+        return '';
+      }
+
+      if (typeof value === 'string') {
+        return String(value).trim();
+      }
+
+      if (typeof value === 'object') {
+        return getVariantIdentity(value);
+      }
+
+      return '';
+    })
+    .filter(Boolean);
+}
+
+function buildPrimaryProductStructureRow(jsonLdDocuments) {
+  const productGroups = jsonLdDocuments.flatMap(document =>
+    collectEntitiesByTypes(document, new Set(['ProductGroup']))
+  );
+  const products = jsonLdDocuments.flatMap(document =>
+    collectEntitiesByTypes(document, new Set(['Product']))
+  );
+
+  if (productGroups.length === 0 || products.length <= 1) {
+    return {
+      type: 'Primary Product Structure',
+      status: 'Pass',
+      recommendation:
+        'No multi-variant ProductGroup structure needs hasVariant validation on this page.'
+    };
+  }
+
+  const primaryGroup = productGroups[0].entity || {};
+  const primaryIdentifier = getVariantIdentity(primaryGroup) || 'ProductGroup';
+  const variantIds = products
+    .map(candidate => getVariantIdentity(candidate.entity))
+    .filter(Boolean);
+  const hasVariantIds = getHasVariantIdentities(primaryGroup);
+
+  if (hasVariantIds.length === 0) {
+    return {
+      type: 'Primary Product Structure',
+      status: 'Warning',
+      recommendation:
+        'Primary ProductGroup ' + primaryIdentifier + ' does not declare hasVariant entries for the detected Product variants. Add hasVariant references to stitch the primary product to each variant.'
+    };
+  }
+
+  const missingVariantIds = variantIds.filter(id => !hasVariantIds.includes(id));
+
+  if (missingVariantIds.length > 0) {
+    return {
+      type: 'Primary Product Structure',
+      status: 'Warning',
+      warnings: missingVariantIds.join(', '),
+      recommendation:
+        'Primary ProductGroup ' + primaryIdentifier + ' is missing hasVariant links for: ' + missingVariantIds.join(', ') + '.',
+    };
+  }
+
+  return {
+    type: 'Primary Product Structure',
+    status: 'Pass',
+    recommendation:
+      'Primary ProductGroup ' + primaryIdentifier + ' correctly contains the detected Product variants via hasVariant.'
+  };
+}
+
 function buildShopifyConflictRow(productCandidates) {
   const uniqueTypes = new Set(
     productCandidates.flatMap(candidate => candidate.types || [])
@@ -522,6 +649,63 @@ function buildShopifyConflictRow(productCandidates) {
     status: 'Pass',
     recommendation:
       'Only one primary Product entity was detected, so no Shopify schema conflict was found.'
+  };
+}
+
+function buildSchemaScopeRow(pageType, detectedTypes) {
+  const typeSet = new Set(detectedTypes || []);
+  const warnings = [];
+
+  if (pageType === 'homepage') {
+    if (!typeSet.has('Organization')) {
+      warnings.push('missing Organization on homepage');
+    }
+
+    if (!typeSet.has('WebSite')) {
+      warnings.push('missing WebSite on homepage');
+    }
+
+    if (typeSet.has('Product')) {
+      warnings.push('Product should not be global on homepage');
+    }
+
+    if (typeSet.has('Article') || typeSet.has('BlogPosting')) {
+      warnings.push('Article should not be global on homepage');
+    }
+  } else {
+    if (typeSet.has('Organization')) {
+      warnings.push('Organization should be homepage-only');
+    }
+
+    if (typeSet.has('WebSite')) {
+      warnings.push('WebSite should be homepage-only');
+    }
+
+    if (typeSet.has('Product') && pageType !== 'product') {
+      warnings.push('Product schema is on a non-product page');
+    }
+
+    if ((typeSet.has('Article') || typeSet.has('BlogPosting')) && pageType !== 'blog') {
+      warnings.push('Article schema is on a non-blog page');
+    }
+  }
+
+  if (warnings.length === 0) {
+    return {
+      type: 'Schema Scope',
+      status: 'Pass',
+      warnings: '',
+      recommendation:
+        'Global schemas are limited to the homepage and local schemas appear on the correct page types.'
+    };
+  }
+
+  return {
+    type: 'Schema Scope',
+    status: 'Warning',
+    warnings: warnings.join(', '),
+    recommendation:
+      'Keep Organization and WebSite on the homepage only, and limit Product or Article schemas to their matching product and blog pages.',
   };
 }
 
@@ -575,6 +759,10 @@ function buildSchemaAudit({
     ...jsonLdProductCandidates,
     ...microdataProductCandidates
   ];
+  const allDetectedTypes = Array.from(new Set([
+    ...jsonLdDocuments.flatMap(document => Array.from(collectAllSchemaTypes(document))),
+    ...microdataItems.flatMap(item => item.types || [])
+  ])).sort();
   const hasSchema =
     jsonLdDocuments.length > 0 ||
     (Array.isArray(microdataItems) && microdataItems.length > 0);
@@ -596,6 +784,8 @@ function buildSchemaAudit({
         jsonLdDocuments,
         productCandidates
       ),
+      buildSchemaScopeRow(pageType, allDetectedTypes),
+      buildPrimaryProductStructureRow(jsonLdDocuments),
       buildShopifyConflictRow(productCandidates),
       buildImplementationRow({ implementationType, pageType, hasSchema })
     ]

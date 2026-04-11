@@ -89,6 +89,7 @@ function buildPageRows(pages) {
     'Schema Audit Statuses',
     'Schema Audit Warnings',
     'Schema Audit Recommendations',
+    'Generated Schema Sample',
     'JSON-LD Scripts',
     'Parsed JSON-LD Scripts',
     'Microdata Items',
@@ -130,6 +131,7 @@ function buildPageRows(pages) {
         .filter(Boolean)
         .join(' | '),
       schemaAuditRows.map(item => item.recommendation).join(' | '),
+      page.generatedSchemaSample || page.structuredDataReport?.generatedSchemaSample || '',
       structuredData.scriptCount || 0,
       structuredData.parsedScriptCount || 0,
       structuredData.microdataItemCount || 0,
