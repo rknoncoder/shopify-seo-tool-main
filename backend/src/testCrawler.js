@@ -1,16 +1,19 @@
-const ShopifyCrawler = require('./crawlers/shopifyCrawler');
+const startCrawler = require('./index');
 const analyzeSEO = require('./analyzers/seoAnalyzer');
 const analyzeSitewideData = require('./analyzers/sitewideAnalyzer');
 const exportAuditToExcel = require('./exporters/excelExporter');
 
 (async () => {
-  const crawlUrl = process.env.AUDIT_URL || 'https://triprindia.com';
-  const crawler = new ShopifyCrawler(crawlUrl);
-  const results = await crawler.start();
+  const crawlUrl = process.env.AUDIT_URL || 'https://www.triprindia.com';
+  const crawlResult = await startCrawler([], crawlUrl);
+  const results = crawlResult.pages || [];
   const sitewideData = analyzeSitewideData(results);
   const analyzed = results.map(page => analyzeSEO(page, sitewideData));
   const report = {
-    summary: sitewideData.summary,
+    summary: {
+      ...crawlResult.summary,
+      ...sitewideData.summary
+    },
     pages: analyzed,
     duplicateTitles: sitewideData.duplicateTitles,
     duplicateMetaDescriptions: sitewideData.duplicateMetaDescriptions,

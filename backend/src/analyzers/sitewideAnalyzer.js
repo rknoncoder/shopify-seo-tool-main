@@ -224,10 +224,11 @@ function analyzeShopifyCollectionProductDuplicates(pages) {
   const findings = [];
   const pageFindings = new Map();
   pages.forEach(page => {
-    const duplicateUrls = page.collectionProductUrls || [];
+    const duplicateUrls =
+      page.collectionProductDuplicateUrls || page.collectionProductUrls || [];
     if (page.pageType !== 'product' || duplicateUrls.length === 0) return;
     const finding = {
-      type: 'shopifyCollectionProductDuplicate',
+      type: 'collection_product_duplicate',
       severity: page.canonical && page.canonical !== page.url ? 'critical' : 'warning',
       message:
         page.canonical && page.canonical !== page.url

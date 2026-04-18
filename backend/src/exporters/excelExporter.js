@@ -80,6 +80,7 @@ function buildPageRows(pages) {
     'Canonical',
     'Canonical Issues',
     'Collection Product URLs',
+    'Collection Product URL Count',
     'Robots',
     'Noindex',
     'Schema Types',
@@ -106,6 +107,10 @@ function buildPageRows(pages) {
     const schema = getPageSchema(page);
     const structuredData = page.structuredData || {};
     const schemaAuditRows = getSchemaAuditRows(page);
+    const collectionProductUrls =
+      page.collectionProductDuplicateUrls ||
+      page.collectionProductUrls ||
+      [];
 
     rows.push([
       page.url,
@@ -118,7 +123,8 @@ function buildPageRows(pages) {
       (page.canonicalConflicts || [])
         .map(item => item.reason || item.message)
         .join(' | '),
-      (page.collectionProductUrls || []).join(', '),
+      collectionProductUrls.join(', '),
+      collectionProductUrls.length,
       page.robotsContent,
       page.isNoindex ? 'Yes' : 'No',
       (schema.detected || []).join(', '),

@@ -91,6 +91,12 @@ function analyzeSEO(page, sitewideData = {}) {
   });
 
   const issues = parseIssues(rawIssues.join(' | '));
+  const collectionDuplicateIssues = shopifyDuplicateFindings.map(finding => ({
+    type: 'collection_product_duplicate',
+    severity: 'warning',
+    message: finding.message,
+    count: (finding.duplicateUrls || []).length
+  }));
   const structuredDataReport = buildStructuredDataReport(
     page,
     structuredDataFindings
@@ -101,7 +107,7 @@ function analyzeSEO(page, sitewideData = {}) {
     schema: structuredDataReport.schema,
     schemaAudit: structuredDataReport.schemaAudit,
     generatedSchemaSample: structuredDataReport.generatedSchemaSample,
-    issues,
+    issues: [...issues, ...collectionDuplicateIssues],
     duplicates: duplicateFindings,
     canonicalConflicts: canonicalFindings,
     shopifyCollectionDuplicates: shopifyDuplicateFindings,

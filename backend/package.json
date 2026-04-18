@@ -7,8 +7,9 @@
     "crawl:test": "node src/testCrawler.js"
   },
   "dependencies": {
-    "axios": "^1.14.0",
+    "axios": "^1.15.0",
     "cheerio": "^1.2.0",
-    "puppeteer": "^24.40.0"
+    "fast-xml-parser": "^4.5.0",
+    "puppeteer": "^24.41.0"
   }
 }
