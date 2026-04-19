@@ -1,6 +1,7 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
 const normalizeUrl = require('../utils/url');
+const { detectShopifyPageType } = require('../utils/pageTypeDetector');
 const { sitemapParser } = require('../crawler/sitemapParser');
 const {
   extractStructuredDataForPage
@@ -67,11 +68,13 @@ class ShopifyCrawler {
     );
   }
 
-  detectPageType(url) {
-    if (url.includes('/products/')) return 'product';
-    if (url.includes('/collections/')) return 'collection';
-    if (url.includes('/blogs/')) return 'blog';
-    return 'other';
+  detectPageType(url, $, html = '') {
+    return detectShopifyPageType({
+      url,
+      html,
+      $,
+      fallback: 'webpage'
+    });
   }
 
   normalizeText(text) {
@@ -885,7 +888,7 @@ class ShopifyCrawler {
 
     const $ = cheerio.load(html);
     const isShopify = this.detectShopify(html);
-    const pageType = this.detectPageType(normalizedUrl);
+    const pageType = this.detectPageType(normalizedUrl, $, html);
     const internalLinks = this.extractInternalLinks($);
     const discoveredCollectionProductAliases = await this.collectCollectionProductAliases(
       normalizedUrl,

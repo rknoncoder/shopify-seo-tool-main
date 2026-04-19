@@ -107,6 +107,16 @@ function analyzeSEO(page, sitewideData = {}) {
     schema: structuredDataReport.schema,
     schemaAudit: structuredDataReport.schemaAudit,
     generatedSchemaSample: structuredDataReport.generatedSchemaSample,
+    generatedSchemaSamples: structuredDataReport.generatedSchemaSamples,
+    detectedSchemaTypes: structuredDataReport.detectedSchemaTypes,
+    expectedSchemaTypes: structuredDataReport.expectedSchemaTypes,
+    missingRequiredSchema: structuredDataReport.missingRequiredSchema,
+    missingRecommendedSchema: structuredDataReport.missingRecommendedSchema,
+    unexpectedSchemaTypes: structuredDataReport.unexpectedSchemaTypes,
+    schemaConflicts: structuredDataReport.schemaConflicts,
+    richResultSummary: structuredDataReport.richResultSummary,
+    schemaRecommendations: structuredDataReport.schemaRecommendations,
+    schemaScoreBreakdown: structuredDataReport.schemaScoreBreakdown,
     issues: [...issues, ...collectionDuplicateIssues],
     duplicates: duplicateFindings,
     canonicalConflicts: canonicalFindings,
@@ -202,12 +212,38 @@ function buildStructuredDataReport(page, findings) {
     }
   });
 
+  (structuredData.schemaRecommendations || []).forEach(recommendation => {
+    const text = [
+      recommendation.priority ? `[${recommendation.priority}]` : '',
+      recommendation.issue,
+      recommendation.howToFix
+    ]
+      .filter(Boolean)
+      .join(' ');
+
+    if (text) {
+      recommendations.push(text);
+    }
+  });
+
   return {
     schema,
     schemaAudit,
     generatedSchemaSample: structuredData.generatedSchemaSample || '',
+    generatedSchemaSamples: structuredData.generatedSchemaSamples || {},
     detectedSchemas: schema.detected,
+    detectedSchemaTypes:
+      structuredData.detectedSchemaTypes || schema.detected || [],
+    expectedSchemaTypes: structuredData.expectedSchemaTypes || [],
     missingSchemas,
+    missingRequiredSchema: structuredData.missingRequiredSchema || [],
+    missingRecommendedSchema:
+      structuredData.missingRecommendedSchema || [],
+    unexpectedSchemaTypes: structuredData.unexpectedSchemaTypes || [],
+    schemaConflicts: structuredData.schemaConflicts || [],
+    richResultSummary: structuredData.richResultSummary || {},
+    schemaRecommendations: structuredData.schemaRecommendations || [],
+    schemaScoreBreakdown: structuredData.schemaScoreBreakdown || {},
     confidence: schema.confidence,
     issues: structuredData.issues || [],
     missingStructuredData: missing,

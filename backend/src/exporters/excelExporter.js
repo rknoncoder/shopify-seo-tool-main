@@ -54,6 +54,32 @@ function getSchemaAuditRows(page) {
   return page.schemaAudit?.rows || page.structuredDataReport?.schemaAudit?.rows || [];
 }
 
+function getSchemaReport(page) {
+  return page.structuredDataReport || page.structuredData || {};
+}
+
+function formatSchemaRecommendation(recommendation) {
+  if (!recommendation || typeof recommendation !== 'object') {
+    return String(recommendation || '');
+  }
+
+  return [
+    recommendation.priority ? `[${recommendation.priority}]` : '',
+    recommendation.issue,
+    recommendation.whyItMatters,
+    recommendation.howToFix
+  ]
+    .filter(Boolean)
+    .join(' ');
+}
+
+function formatGeneratedSamples(samples = {}) {
+  return Object.entries(samples)
+    .filter(([, value]) => value)
+    .map(([key, value]) => `${key}:\n${value}`)
+    .join('\n\n');
+}
+
 function buildSummaryRows(summary) {
   return [
     ['SEO Audit Summary', ''],
@@ -84,12 +110,20 @@ function buildPageRows(pages) {
     'Robots',
     'Noindex',
     'Schema Types',
+    'Expected Schema Types',
+    'Missing Required Schema',
+    'Missing Recommended Schema',
+    'Unexpected Schema Types',
+    'Schema Conflicts',
+    'Rich Result Summary',
+    'Schema Score',
     'Schema Item Count',
     'Schema Confidence',
     'Schema Audit Types',
     'Schema Audit Statuses',
     'Schema Audit Warnings',
     'Schema Audit Recommendations',
+    'Schema Audit Suggestions',
     'Generated Schema Sample',
     'JSON-LD Scripts',
     'Parsed JSON-LD Scripts',
@@ -106,6 +140,7 @@ function buildPageRows(pages) {
   pages.forEach(page => {
     const schema = getPageSchema(page);
     const structuredData = page.structuredData || {};
+    const schemaReport = getSchemaReport(page);
     const schemaAuditRows = getSchemaAuditRows(page);
     const collectionProductUrls =
       page.collectionProductDuplicateUrls ||
@@ -128,6 +163,22 @@ function buildPageRows(pages) {
       page.robotsContent,
       page.isNoindex ? 'Yes' : 'No',
       (schema.detected || []).join(', '),
+      (schemaReport.expectedSchemaTypes || page.expectedSchemaTypes || []).join(', '),
+      (schemaReport.missingRequiredSchema || page.missingRequiredSchema || []).join(', '),
+      (schemaReport.missingRecommendedSchema || page.missingRecommendedSchema || []).join(', '),
+      (schemaReport.unexpectedSchemaTypes || page.unexpectedSchemaTypes || [])
+        .map(item => item.type || item)
+        .join(', '),
+      (schemaReport.schemaConflicts || page.schemaConflicts || [])
+        .map(item => item.issue || item)
+        .join(' | '),
+      [
+        schemaReport.richResultSummary?.status || page.richResultSummary?.status || '',
+        schemaReport.richResultSummary?.notes || page.richResultSummary?.notes || ''
+      ]
+        .filter(Boolean)
+        .join(' - '),
+      schemaReport.schemaScoreBreakdown?.score ?? page.schemaScoreBreakdown?.score ?? '',
       schema.count || 0,
       schema.confidence || 'low',
       schemaAuditRows.map(item => item.type).join(' | '),
@@ -137,7 +188,18 @@ function buildPageRows(pages) {
         .filter(Boolean)
         .join(' | '),
       schemaAuditRows.map(item => item.recommendation).join(' | '),
-      page.generatedSchemaSample || page.structuredDataReport?.generatedSchemaSample || '',
+      schemaAuditRows
+        .map(item => item.suggestion || '')
+        .filter(Boolean)
+        .join(' | '),
+      formatGeneratedSamples(
+        schemaReport.generatedSchemaSamples ||
+          page.generatedSchemaSamples ||
+          {}
+      ) ||
+        page.generatedSchemaSample ||
+        page.structuredDataReport?.generatedSchemaSample ||
+        '',
       structuredData.scriptCount || 0,
       structuredData.parsedScriptCount || 0,
       structuredData.microdataItemCount || 0,
@@ -152,7 +214,14 @@ function buildPageRows(pages) {
         .flatMap(item => item.urls || [])
         .filter((url, index, all) => all.indexOf(url) === index)
         .join(', '),
-      (page.structuredDataReport?.recommendations || []).join(' | ')
+      (
+        schemaReport.schemaRecommendations ||
+        page.schemaRecommendations ||
+        []
+      )
+        .map(formatSchemaRecommendation)
+        .join(' | ') ||
+        (page.structuredDataReport?.recommendations || []).join(' | ')
     ]);
   });
 

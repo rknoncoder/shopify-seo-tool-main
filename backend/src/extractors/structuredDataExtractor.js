@@ -4,13 +4,16 @@ const {
   buildSchemaAudit,
   normalizePrice
 } = require('../audits/schemaAudit');
+const { detectShopifyPageType } = require('../utils/pageTypeDetector');
 
 const REQUIRED_SCHEMAS_BY_PAGE_TYPE = {
   homepage: ['Organization', 'WebSite'],
   product: ['Product'],
-  collection: ['BreadcrumbList', 'ItemList'],
+  collection: ['CollectionPage', 'BreadcrumbList'],
   blog: ['Article'],
-  other: []
+  page: ['WebPage'],
+  search: ['SearchResultsPage'],
+  webpage: ['WebPage']
 };
 
 const SCHEMA_ALIASES = {
@@ -24,6 +27,8 @@ const SCHEMA_ALIASES = {
   organization: 'Organization',
   website: 'WebSite',
   webpage: 'WebPage',
+  collectionpage: 'CollectionPage',
+  searchresultspage: 'SearchResultsPage',
   contactpoint: 'ContactPoint',
   searchaction: 'SearchAction',
   aggregaterating: 'AggregateRating',
@@ -74,7 +79,80 @@ function toBreadcrumbLabel(segment) {
     .replace(/\b\w/g, char => char.toUpperCase());
 }
 
-function buildBreadcrumbListSample(pageUrl) {
+function resolveBreadcrumbUrl(pageUrl, href) {
+  const rawHref = String(href || '').trim();
+
+  if (!rawHref || !pageUrl) {
+    return '';
+  }
+
+  try {
+    return new URL(rawHref, pageUrl).href;
+  } catch (error) {
+    return '';
+  }
+}
+
+function buildBreadcrumbListFromLinks(links = []) {
+  const normalizedLinks = [...links];
+  const firstLabel = String(normalizedLinks[0]?.name || '').trim().toLowerCase();
+
+  if (normalizedLinks.length > 0 && firstLabel !== 'home') {
+    let homeUrl = '';
+
+    try {
+      homeUrl = new URL(normalizedLinks[0].item || normalizedLinks[0].href).origin + '/';
+    } catch (error) {
+      homeUrl = '';
+    }
+
+    normalizedLinks.unshift({
+      name: 'Home',
+      href: '/',
+      item: homeUrl
+    });
+  }
+
+  const itemListElement = normalizedLinks
+    .map((link, index) => {
+      const name = String(link?.name || '').replace(/\s+/g, ' ').trim();
+
+      if (!name) {
+        return null;
+      }
+
+      const item = {
+        '@type': 'ListItem',
+        position: index + 1,
+        name
+      };
+
+      if (link.item) {
+        item.item = link.item;
+      }
+
+      return item;
+    })
+    .filter(Boolean);
+
+  if (itemListElement.length === 0) {
+    return '';
+  }
+
+  return JSON.stringify({
+    '@context': 'https://schema.org',
+    '@type': 'BreadcrumbList',
+    itemListElement
+  }, null, 2);
+}
+
+function buildBreadcrumbListSample(pageUrl, breadcrumbLinks = []) {
+  const sampleFromLinks = buildBreadcrumbListFromLinks(breadcrumbLinks);
+
+  if (sampleFromLinks) {
+    return sampleFromLinks;
+  }
+
   try {
     const parsedUrl = new URL(pageUrl);
     const segments = parsedUrl.pathname.split('/').filter(Boolean);
@@ -120,49 +198,94 @@ function hasBreadcrumbTrailText(text) {
   return /(home\s*(>|\/|›|»|→).+\s*(>|\/|›|»|→).+)/i.test(normalized);
 }
 
-function detectBreadcrumbUiFromCheerio($) {
+function extractBreadcrumbLinksFromElement($, element, pageUrl = '') {
+  return $(element)
+    .find('a')
+    .map((_, link) => {
+      const name = $(link).text().replace(/\s+/g, ' ').trim();
+      const rawHref = $(link).attr('href') || '';
+
+      if (!name) {
+        return null;
+      }
+
+      return {
+        name,
+        href: rawHref,
+        item: resolveBreadcrumbUrl(pageUrl, rawHref)
+      };
+    })
+    .get()
+    .filter(Boolean);
+}
+
+function extractBreadcrumbTrailFromCheerio($, pageUrl = '') {
   const explicitMatches = [
+    'nav[aria-label="Breadcrumb" i]',
     'nav[aria-label*="breadcrumb" i]',
     'nav[aria-label*="breadcrumbs" i]',
+    '.breadcrumb',
+    '.breadcrumbs',
+    '.b-crumbs',
     '[class*="breadcrumb" i]',
     '[class*="breadcrumbs" i]',
+    '[class*="b-crumbs" i]',
     '[data-testid*="breadcrumb" i]'
   ];
+  const explicitElements = $(explicitMatches.join(',')).toArray();
 
-  if ($(explicitMatches.join(',')).length > 0) {
-    return true;
+  for (const element of explicitElements) {
+    const links = extractBreadcrumbLinksFromElement($, element, pageUrl);
+
+    if (links.length > 0) {
+      return {
+        present: true,
+        links
+      };
+    }
   }
 
-  let hasTrail = false;
+  if (explicitElements.length > 0) {
+    return {
+      present: true,
+      links: []
+    };
+  }
+
+  let trail = {
+    present: false,
+    links: []
+  };
 
   $('nav, ol, ul, div').each((_, el) => {
     const links = $(el).find('a');
     const text = $(el).text();
 
-    if (links.length >= 3 && hasBreadcrumbTrailText(text)) {
-      hasTrail = true;
+    if (links.length >= 2 && hasBreadcrumbTrailText(text)) {
+      trail = {
+        present: true,
+        links: extractBreadcrumbLinksFromElement($, el, pageUrl)
+      };
       return false;
     }
 
     return undefined;
   });
 
-  return hasTrail;
+  return trail;
 }
 
-function resolveSchemaPageType(url, pageType) {
-  try {
-    const parsedUrl = new URL(url);
-    const normalizedPath = parsedUrl.pathname.replace(/\/+$/, '') || '/';
+function detectBreadcrumbUiFromCheerio($) {
+  return extractBreadcrumbTrailFromCheerio($).present;
+}
 
-    if (normalizedPath === '/') {
-      return 'homepage';
-    }
-  } catch (error) {
-    return pageType || 'other';
-  }
-
-  return pageType || 'other';
+function resolveSchemaPageType(url, pageType, html = '', $ = null) {
+  return detectShopifyPageType({
+    url,
+    html,
+    $,
+    fallback: pageType
+  });
 }
 
 function normalizeSchemaType(type) {
@@ -322,7 +445,8 @@ function buildBreadcrumbSchemaIssue(detectedSchemas, breadcrumbUiPresent) {
   return {
     type: 'breadcrumb-missing-schema',
     severity: 'high',
-    message: 'Breadcrumb UI found but schema missing'
+    message:
+      'Visual breadcrumbs detected but Structured Data is missing. Search engines cannot generate breadcrumb snippets for this page.'
   };
 }
 
@@ -331,10 +455,15 @@ function buildStructuredDataResult(
   parseResult,
   source,
   pageUrl,
-  breadcrumbUiPresent = false,
+  breadcrumbTrail = { present: false, links: [] },
   microdataItems = [],
   visiblePrice = ''
 ) {
+  const normalizedBreadcrumbTrail =
+    typeof breadcrumbTrail === 'boolean'
+      ? { present: breadcrumbTrail, links: [] }
+      : breadcrumbTrail || { present: false, links: [] };
+  const breadcrumbUiPresent = Boolean(normalizedBreadcrumbTrail.present);
   const microdataTypes = microdataItems
     .flatMap(item => item.types || [])
     .filter((type, index, all) => type && all.indexOf(type) === index)
@@ -350,7 +479,7 @@ function buildStructuredDataResult(
     breadcrumbUiPresent
   );
   const generatedSchemaSample = breadcrumbIssue
-    ? buildBreadcrumbListSample(pageUrl)
+    ? buildBreadcrumbListSample(pageUrl, normalizedBreadcrumbTrail.links || [])
     : '';
 
   if (breadcrumbIssue) {
@@ -373,10 +502,21 @@ function buildStructuredDataResult(
   const schemaAudit = buildSchemaAudit({
     pageType,
     source,
+    pageUrl,
     jsonLdDocuments: parseResult.parsedDocuments,
     microdataItems,
+    breadcrumbUiPresent,
+    breadcrumbLinks: normalizedBreadcrumbTrail.links || [],
+    jsonLdErrorCount: parseResult.errors.length,
     visiblePrice
   });
+
+  const generatedSchemaSamples = {
+    ...(schemaAudit.generatedSchemaSamples || {})
+  };
+  if (generatedSchemaSample && !generatedSchemaSamples.breadcrumbList) {
+    generatedSchemaSamples.breadcrumbList = generatedSchemaSample;
+  }
 
   return {
     detectedSchemas: combinedDetectedSchemas,
@@ -384,6 +524,7 @@ function buildStructuredDataResult(
     confidence,
     source,
     breadcrumbUiPresent,
+    breadcrumbLinks: normalizedBreadcrumbTrail.links || [],
     issues,
     recommendations,
     scriptCount: parseResult.scriptCount,
@@ -397,6 +538,16 @@ function buildStructuredDataResult(
     microdataItemCount: microdataItems.length,
     schemaAudit,
     generatedSchemaSample,
+    generatedSchemaSamples,
+    detectedSchemaTypes: schemaAudit.detectedSchemaTypes || combinedDetectedSchemas,
+    expectedSchemaTypes: schemaAudit.expectedSchemaTypes || [],
+    missingRequiredSchema: schemaAudit.missingRequiredSchema || [],
+    missingRecommendedSchema: schemaAudit.missingRecommendedSchema || [],
+    unexpectedSchemaTypes: schemaAudit.unexpectedSchemaTypes || [],
+    schemaConflicts: schemaAudit.schemaConflicts || [],
+    richResultSummary: schemaAudit.richResultSummary || {},
+    schemaRecommendations: schemaAudit.schemaRecommendations || [],
+    schemaScoreBreakdown: schemaAudit.schemaScoreBreakdown || {},
     visiblePrice: normalizePrice(visiblePrice) || '',
     totalDetectedItems:
       parseResult.schemaObjectCount + microdataItems.length > 0
@@ -409,20 +560,21 @@ function buildStructuredDataResult(
 
 function extractStructuredDataFromHtml(html, pageType, pageUrl = '') {
   const $ = cheerio.load(html);
+  const effectivePageType = resolveSchemaPageType(pageUrl, pageType, html, $);
   const scripts = $('script[type="application/ld+json"]')
     .map((_, el) => $(el).html() || '')
     .get();
   const parseResult = parseJsonLdScripts(scripts);
-  const breadcrumbUiPresent = detectBreadcrumbUiFromCheerio($);
+  const breadcrumbTrail = extractBreadcrumbTrailFromCheerio($, pageUrl);
   const microdataItems = extractMicrodataItems($);
   const visiblePrice = extractVisiblePrice($);
 
   return buildStructuredDataResult(
-    pageType,
+    effectivePageType,
     parseResult,
     'raw-html',
     pageUrl,
-    breadcrumbUiPresent,
+    breadcrumbTrail,
     microdataItems,
     visiblePrice
   );
@@ -507,14 +659,16 @@ async function extractStructuredDataWithPuppeteer(url, pageType) {
 
     const parseResult = parseJsonLdScripts(renderedData.scriptContents);
     const renderedHtml = await page.content();
-    const renderedMicrodataItems = extractMicrodataItems(cheerio.load(renderedHtml));
+    const rendered$ = cheerio.load(renderedHtml);
+    const renderedMicrodataItems = extractMicrodataItems(rendered$);
+    const breadcrumbTrail = extractBreadcrumbTrailFromCheerio(rendered$, url);
 
     return buildStructuredDataResult(
       pageType,
       parseResult,
       'puppeteer',
       url,
-      renderedData.breadcrumbUiPresent,
+      breadcrumbTrail,
       renderedMicrodataItems,
       normalizePrice(renderedData.visiblePrice) || ''
     );
@@ -530,7 +684,7 @@ async function extractStructuredDataWithPuppeteer(url, pageType) {
 }
 
 async function extractStructuredDataForPage({ url, html, pageType }) {
-  const effectivePageType = resolveSchemaPageType(url, pageType);
+  const effectivePageType = resolveSchemaPageType(url, pageType, html, cheerio.load(html));
   const rawResult = extractStructuredDataFromHtml(html, effectivePageType, url);
 
   console.log(
@@ -573,6 +727,7 @@ module.exports = {
   parseJsonLdScripts,
   resolveSchemaPageType,
   detectBreadcrumbUiFromCheerio,
+  extractBreadcrumbTrailFromCheerio,
   extractStructuredDataFromHtml,
   extractStructuredDataWithPuppeteer,
   extractStructuredDataForPage,

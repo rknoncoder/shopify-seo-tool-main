@@ -262,6 +262,18 @@ function getOptionalProductFieldMap(candidate) {
   };
 }
 
+function getPrimaryProductCandidate(productCandidates = []) {
+  return (
+    productCandidates.find(candidate => candidate.source === 'json-ld') ||
+    productCandidates[0] ||
+    null
+  );
+}
+
+function getDuplicateProductCandidates(productCandidates = [], primaryCandidate) {
+  return productCandidates.filter(candidate => candidate !== primaryCandidate);
+}
+
 function normalizePrice(value) {
   if (value === undefined || value === null) {
     return null;
@@ -331,6 +343,621 @@ function collectLinkedEntityIds(value, found = new Set()) {
   }
 
   return found;
+}
+
+function hasSchemaTypeInJsonLd(jsonLdDocuments = [], schemaType) {
+  const targetTypes = new Set([schemaType]);
+
+  return jsonLdDocuments.some(
+    document => collectEntitiesByTypes(document, targetTypes).length > 0
+  );
+}
+
+function hasSchemaTypeInMicrodata(microdataItems = [], schemaType) {
+  return microdataItems.some(item =>
+    (item.types || []).some(type => type === schemaType)
+  );
+}
+
+const PAGE_SCHEMA_RULES = {
+  homepage: {
+    required: [
+      { label: 'Organization', anyOf: ['Organization'] },
+      { label: 'WebSite', anyOf: ['WebSite'] }
+    ],
+    recommended: []
+  },
+  collection: {
+    required: [
+      { label: 'CollectionPage or WebPage', anyOf: ['CollectionPage', 'WebPage'] }
+    ],
+    recommended: [
+      { label: 'BreadcrumbList', anyOf: ['BreadcrumbList'] },
+      { label: 'ItemList', anyOf: ['ItemList'], optional: true }
+    ]
+  },
+  product: {
+    required: [
+      { label: 'Product or ProductGroup', anyOf: ['Product', 'ProductGroup'] },
+      { label: 'Offer or AggregateOffer', anyOf: ['Offer', 'AggregateOffer'] }
+    ],
+    recommended: [{ label: 'BreadcrumbList', anyOf: ['BreadcrumbList'] }]
+  },
+  blog: {
+    required: [
+      { label: 'Article or BlogPosting', anyOf: ['Article', 'BlogPosting'] }
+    ],
+    recommended: [{ label: 'BreadcrumbList', anyOf: ['BreadcrumbList'] }]
+  },
+  page: {
+    required: [{ label: 'WebPage', anyOf: ['WebPage'] }],
+    recommended: []
+  },
+  search: {
+    required: [{ label: 'SearchResultsPage or WebPage', anyOf: ['SearchResultsPage', 'WebPage'] }],
+    recommended: []
+  },
+  webpage: {
+    required: [{ label: 'WebPage', anyOf: ['WebPage'] }],
+    recommended: []
+  }
+};
+
+function getSchemaRules(pageType) {
+  return PAGE_SCHEMA_RULES[pageType] || PAGE_SCHEMA_RULES.webpage;
+}
+
+function hasAnySchemaType(detectedTypes, expectedTypes) {
+  const typeSet = new Set(detectedTypes || []);
+  return expectedTypes.some(type => typeSet.has(type));
+}
+
+function listExpectedSchemaTypes(pageType) {
+  const rules = getSchemaRules(pageType);
+  return [
+    ...rules.required.map(rule => rule.label),
+    ...rules.recommended.map(rule =>
+      rule.optional ? `${rule.label} (optional)` : rule.label
+    )
+  ];
+}
+
+function getMissingSchemaGroups(pageType, detectedTypes, breadcrumbUiPresent) {
+  const rules = getSchemaRules(pageType);
+  const missingRequired = rules.required
+    .filter(rule => !hasAnySchemaType(detectedTypes, rule.anyOf))
+    .map(rule => rule.label);
+  const missingRecommended = rules.recommended
+    .filter(rule => !hasAnySchemaType(detectedTypes, rule.anyOf))
+    .filter(rule => {
+      if (rule.label === 'BreadcrumbList') {
+        return pageType !== 'homepage' && breadcrumbUiPresent;
+      }
+
+      return true;
+    })
+    .map(rule => rule.label);
+
+  return {
+    missingRequired,
+    missingRecommended
+  };
+}
+
+function getUnexpectedSchemaTypes(pageType, detectedTypes) {
+  const typeSet = new Set(detectedTypes || []);
+  const unexpected = [];
+
+  if (pageType !== 'product' && (typeSet.has('Product') || typeSet.has('ProductGroup'))) {
+    unexpected.push({
+      type: 'Product/ProductGroup',
+      priority: pageType === 'collection' ? 'medium' : 'high',
+      reason: 'Product schema should usually be limited to canonical product detail pages.'
+    });
+  }
+
+  if (pageType !== 'blog' && (typeSet.has('Article') || typeSet.has('BlogPosting'))) {
+    unexpected.push({
+      type: 'Article/BlogPosting',
+      priority: 'medium',
+      reason: 'Article schema should only describe article or blog content.'
+    });
+  }
+
+  if (pageType !== 'collection' && typeSet.has('CollectionPage')) {
+    unexpected.push({
+      type: 'CollectionPage',
+      priority: 'medium',
+      reason: 'CollectionPage schema should describe Shopify collection pages.'
+    });
+  }
+
+  if (pageType !== 'homepage' && typeSet.has('WebSite')) {
+    unexpected.push({
+      type: 'WebSite',
+      priority: 'low',
+      reason: 'WebSite schema is usually strongest as a homepage/site entity.'
+    });
+  }
+
+  return unexpected;
+}
+
+function getSchemaConflicts(pageType, detectedTypes, productCandidates) {
+  const typeSet = new Set(detectedTypes || []);
+  const conflicts = [];
+  const productTypeCount = productCandidates.filter(
+    candidate => candidate.source === 'json-ld'
+  ).length;
+
+  if (
+    (typeSet.has('Product') || typeSet.has('ProductGroup')) &&
+    (typeSet.has('Article') || typeSet.has('BlogPosting'))
+  ) {
+    conflicts.push({
+      priority: 'high',
+      issue: 'Product and Article schema are both present',
+      whyItMatters:
+        'Mixed primary entities make it harder for search engines to understand the page intent.',
+      howToFix:
+        'Keep one primary schema type that matches the Shopify page template.'
+    });
+  }
+
+  if (pageType === 'collection' && (typeSet.has('Product') || typeSet.has('ProductGroup'))) {
+    conflicts.push({
+      priority: 'medium',
+      issue: 'Collection page contains product-detail schema',
+      whyItMatters:
+        'Collection pages should describe the collection, not compete with product detail pages.',
+      howToFix:
+        'Use CollectionPage plus optional ItemList, and reserve Product schema for /products/ URLs.'
+    });
+  }
+
+  if (productTypeCount > 1) {
+    conflicts.push({
+      priority: 'medium',
+      issue: 'Multiple JSON-LD Product entities detected',
+      whyItMatters:
+        'Duplicate Product entities from theme and app injections can create inconsistent rich result data.',
+      howToFix:
+        'Choose one canonical Product/ProductGroup implementation and remove duplicate app or theme output.'
+    });
+  }
+
+  return conflicts;
+}
+
+function getOrigin(pageUrl) {
+  try {
+    return new URL(pageUrl).origin;
+  } catch (error) {
+    return '';
+  }
+}
+
+function getPageEntityId(pageUrl, suffix) {
+  const cleanUrl = String(pageUrl || '').split('#')[0];
+  return cleanUrl ? `${cleanUrl}#${suffix}` : `#${suffix}`;
+}
+
+function stringifySample(value) {
+  return JSON.stringify(value, null, 2);
+}
+
+function buildOrganizationSample(pageUrl) {
+  const origin = getOrigin(pageUrl);
+
+  if (!origin) {
+    return '';
+  }
+
+  return stringifySample({
+    '@context': 'https://schema.org',
+    '@type': 'Organization',
+    '@id': `${origin}/#organization`,
+    name: 'Store name',
+    url: `${origin}/`,
+    logo: `${origin}/path-to-logo.png`
+  });
+}
+
+function buildWebSiteSample(pageUrl) {
+  const origin = getOrigin(pageUrl);
+
+  if (!origin) {
+    return '';
+  }
+
+  return stringifySample({
+    '@context': 'https://schema.org',
+    '@type': 'WebSite',
+    '@id': `${origin}/#website`,
+    url: `${origin}/`,
+    name: 'Store name',
+    publisher: {
+      '@id': `${origin}/#organization`
+    }
+  });
+}
+
+function buildBreadcrumbSampleFromLinks(pageUrl, breadcrumbLinks = []) {
+  const links = (breadcrumbLinks || []).filter(link => link?.name);
+
+  if (links.length === 0) {
+    return '';
+  }
+
+  const normalizedLinks = [...links];
+  const firstLabel = String(normalizedLinks[0]?.name || '').trim().toLowerCase();
+  const origin = getOrigin(pageUrl);
+
+  if (firstLabel !== 'home') {
+    normalizedLinks.unshift({
+      name: 'Home',
+      href: '/',
+      item: origin ? `${origin}/` : '/'
+    });
+  }
+
+  return stringifySample({
+    '@context': 'https://schema.org',
+    '@type': 'BreadcrumbList',
+    '@id': getPageEntityId(pageUrl, 'breadcrumb'),
+    itemListElement: normalizedLinks.map((link, index) => ({
+      '@type': 'ListItem',
+      position: index + 1,
+      name: link.name,
+      item: link.item || link.href || pageUrl
+    }))
+  });
+}
+
+function buildCollectionPageSample(pageUrl) {
+  const origin = getOrigin(pageUrl);
+
+  return stringifySample({
+    '@context': 'https://schema.org',
+    '@type': 'CollectionPage',
+    '@id': getPageEntityId(pageUrl, 'webpage'),
+    url: pageUrl,
+    name: 'Collection name',
+    isPartOf: origin ? { '@id': `${origin}/#website` } : undefined,
+    publisher: origin ? { '@id': `${origin}/#organization` } : undefined,
+    breadcrumb: {
+      '@id': getPageEntityId(pageUrl, 'breadcrumb')
+    }
+  });
+}
+
+function buildItemListSample(pageUrl) {
+  return stringifySample({
+    '@context': 'https://schema.org',
+    '@type': 'ItemList',
+    '@id': getPageEntityId(pageUrl, 'itemlist'),
+    name: 'Collection products',
+    itemListElement: [
+      {
+        '@type': 'ListItem',
+        position: 1,
+        url: `${getOrigin(pageUrl) || 'https://example.com'}/products/product-handle`
+      }
+    ]
+  });
+}
+
+function buildProductSample(pageUrl) {
+  const origin = getOrigin(pageUrl);
+
+  return stringifySample({
+    '@context': 'https://schema.org',
+    '@type': 'Product',
+    '@id': getPageEntityId(pageUrl, 'product'),
+    name: 'Product name',
+    url: pageUrl,
+    brand: origin ? { '@id': `${origin}/#organization` } : undefined,
+    offers: {
+      '@type': 'Offer',
+      url: pageUrl,
+      priceCurrency: 'INR',
+      price: '0.00',
+      availability: 'https://schema.org/InStock'
+    }
+  });
+}
+
+function buildGeneratedSchemaSamples({
+  pageType,
+  pageUrl,
+  breadcrumbLinks,
+  missingRequired,
+  missingRecommended
+}) {
+  const samples = {};
+  const missing = new Set([...missingRequired, ...missingRecommended]);
+
+  if (pageType === 'homepage') {
+    if (missing.has('Organization')) samples.organization = buildOrganizationSample(pageUrl);
+    if (missing.has('WebSite')) samples.webSite = buildWebSiteSample(pageUrl);
+  }
+
+  if (['collection', 'product', 'blog'].includes(pageType)) {
+    const breadcrumbSample = buildBreadcrumbSampleFromLinks(pageUrl, breadcrumbLinks);
+    if (breadcrumbSample) {
+      samples.breadcrumbList = breadcrumbSample;
+    }
+  }
+
+  if (pageType === 'collection') {
+    samples.collectionPage = buildCollectionPageSample(pageUrl);
+    samples.itemList = buildItemListSample(pageUrl);
+  }
+
+  if (pageType === 'product' && missing.has('Product or ProductGroup')) {
+    samples.product = buildProductSample(pageUrl);
+  }
+
+  return samples;
+}
+
+function createSchemaRecommendation({
+  priority,
+  issue,
+  whyItMatters,
+  howToFix,
+  sampleJsonLd = ''
+}) {
+  return {
+    priority,
+    issue,
+    whyItMatters,
+    howToFix,
+    sampleJsonLd
+  };
+}
+
+function buildRichResultSummary({
+  pageType,
+  productCandidates,
+  detectedTypes,
+  missingRequired,
+  missingRecommended
+}) {
+  const typeSet = new Set(detectedTypes || []);
+
+  if (pageType === 'product') {
+    if (productCandidates.length === 0) {
+      return {
+        status: 'Not eligible',
+        notes:
+          'Product rich results require Product/ProductGroup markup with Offer pricing and availability.'
+      };
+    }
+
+    const eligibility = productCandidates
+      .map(hasProductEligibilityFields)
+      .find(check => ['name', 'image', 'price', 'availability'].every(field => check[field]));
+
+    return {
+      status: eligibility ? 'Eligible' : 'Needs improvement',
+      notes: eligibility
+        ? 'Product markup has the core fields needed for rich result eligibility.'
+        : 'Product markup exists but is missing one or more core rich result fields.'
+    };
+  }
+
+  if (pageType === 'collection') {
+    return {
+      status: typeSet.has('BreadcrumbList') ? 'Breadcrumb eligible' : 'Needs BreadcrumbList',
+      notes: typeSet.has('ItemList')
+        ? 'Collection has breadcrumb markup and an ItemList enhancement.'
+        : 'Collection rich result opportunities are mostly breadcrumb snippets; ItemList is optional context.'
+    };
+  }
+
+  if (pageType === 'blog') {
+    return {
+      status:
+        typeSet.has('Article') || typeSet.has('BlogPosting')
+          ? 'Article markup present'
+          : 'Needs Article markup',
+      notes: missingRecommended.includes('BreadcrumbList')
+        ? 'Add BreadcrumbList to improve breadcrumb snippet eligibility.'
+        : 'Article schema is the primary rich result signal for blog pages.'
+    };
+  }
+
+  if (pageType === 'homepage') {
+    return {
+      status: missingRequired.length === 0 ? 'Site entity complete' : 'Needs site entity schema',
+      notes: 'Organization and WebSite schema help search engines understand the store entity.'
+    };
+  }
+
+  return {
+    status: 'Informational',
+    notes: 'No specialized rich result eligibility checks are required for this page type.'
+  };
+}
+
+function buildSchemaScoreBreakdown({
+  missingRequired,
+  missingRecommended,
+  unexpectedSchemaTypes,
+  schemaConflicts,
+  jsonLdErrorCount,
+  implementationType
+}) {
+  const deductions = [];
+
+  if (jsonLdErrorCount > 0) {
+    deductions.push({
+      category: 'JSON-LD validity',
+      points: jsonLdErrorCount * 20,
+      reason: `${jsonLdErrorCount} JSON-LD block(s) failed to parse.`
+    });
+  }
+
+  missingRequired.forEach(schema => {
+    deductions.push({
+      category: 'Required schema',
+      points: 18,
+      reason: `${schema} is missing.`
+    });
+  });
+
+  missingRecommended.forEach(schema => {
+    deductions.push({
+      category: 'Recommended schema',
+      points: schema === 'ItemList' ? 5 : 10,
+      reason: `${schema} is recommended for this page type.`
+    });
+  });
+
+  unexpectedSchemaTypes.forEach(item => {
+    deductions.push({
+      category: 'Unexpected schema',
+      points: item.priority === 'high' ? 12 : item.priority === 'medium' ? 8 : 4,
+      reason: `${item.type}: ${item.reason}`
+    });
+  });
+
+  schemaConflicts.forEach(conflict => {
+    deductions.push({
+      category: 'Schema conflict',
+      points: conflict.priority === 'high' ? 15 : 10,
+      reason: conflict.issue
+    });
+  });
+
+  if (implementationType === 'App-level') {
+    deductions.push({
+      category: 'Implementation source',
+      points: 5,
+      reason: 'Schema appears to be injected after load.'
+    });
+  }
+
+  const totalDeduction = deductions.reduce(
+    (total, item) => total + item.points,
+    0
+  );
+
+  return {
+    score: Math.max(0, 100 - totalDeduction),
+    deductions
+  };
+}
+
+function buildSchemaRecommendations({
+  pageType,
+  pageUrl,
+  missingRequired,
+  missingRecommended,
+  unexpectedSchemaTypes,
+  schemaConflicts,
+  generatedSchemaSamples,
+  implementationType,
+  entityStitchingRows
+}) {
+  const recommendations = [];
+
+  missingRequired.forEach(schema => {
+    const isBreadcrumb = schema === 'BreadcrumbList';
+    recommendations.push(createSchemaRecommendation({
+      priority: isBreadcrumb ? 'high' : 'high',
+      issue: `Missing required schema: ${schema}`,
+      whyItMatters: isBreadcrumb
+        ? 'Search engines cannot generate breadcrumb snippets without BreadcrumbList structured data.'
+        : 'Required schema helps search engines classify the primary Shopify page entity.',
+      howToFix: `Add ${schema} JSON-LD that matches the visible page content.`,
+      sampleJsonLd:
+        schema === 'Organization'
+          ? generatedSchemaSamples.organization
+          : schema === 'WebSite'
+            ? generatedSchemaSamples.webSite
+            : schema.includes('CollectionPage')
+              ? generatedSchemaSamples.collectionPage
+              : schema.includes('Product')
+                ? generatedSchemaSamples.product
+                : isBreadcrumb
+                  ? generatedSchemaSamples.breadcrumbList
+                  : ''
+    }));
+  });
+
+  missingRecommended.forEach(schema => {
+    recommendations.push(createSchemaRecommendation({
+      priority: schema === 'BreadcrumbList' ? 'high' : 'low',
+      issue: `Missing recommended schema: ${schema}`,
+      whyItMatters:
+        schema === 'ItemList'
+          ? 'ItemList can clarify that a collection page is a list of products without adding Product schema to the collection.'
+          : 'Recommended schema improves context and can support richer search presentation.',
+      howToFix:
+        schema === 'ItemList'
+          ? 'Add an ItemList with product URLs and list positions for visible collection products.'
+          : `Add ${schema} JSON-LD that mirrors the visible UI.`,
+      sampleJsonLd:
+        schema === 'ItemList'
+          ? generatedSchemaSamples.itemList
+          : schema === 'BreadcrumbList'
+            ? generatedSchemaSamples.breadcrumbList
+            : ''
+    }));
+  });
+
+  unexpectedSchemaTypes.forEach(item => {
+    recommendations.push(createSchemaRecommendation({
+      priority: item.priority,
+      issue: `Unexpected schema detected: ${item.type}`,
+      whyItMatters: item.reason,
+      howToFix:
+        pageType === 'collection' && item.type === 'Product/ProductGroup'
+          ? 'Remove product-detail schema from the collection template and use CollectionPage plus optional ItemList.'
+          : 'Move this schema to the template that matches its entity type.'
+    }));
+  });
+
+  schemaConflicts.forEach(conflict => {
+    recommendations.push(createSchemaRecommendation(conflict));
+  });
+
+  entityStitchingRows
+    .filter(row => row.status === 'Warning' || row.status === 'Error')
+    .forEach(row => {
+      recommendations.push(createSchemaRecommendation({
+        priority: 'medium',
+        issue: row.type,
+        whyItMatters:
+          'Stable @id links help search engines connect Product, WebSite, Breadcrumb, and Organization entities.',
+        howToFix: row.recommendation
+      }));
+    });
+
+  if (implementationType === 'App-level') {
+    recommendations.push(createSchemaRecommendation({
+      priority: 'low',
+      issue: 'Schema appears to be app-injected',
+      whyItMatters:
+        'Theme-level JSON-LD in the initial HTML is usually more reliable for crawlers.',
+      howToFix:
+        'Verify app-injected schema renders consistently, or move core schema into the Shopify theme where possible.'
+    }));
+  }
+
+  if (pageType === 'homepage' && !missingRequired.includes('Organization')) {
+    recommendations.push(createSchemaRecommendation({
+      priority: 'low',
+      issue: 'Use a stable Organization @id',
+      whyItMatters:
+        'A consistent Organization @id lets product, website, and breadcrumb entities reference the same store entity.',
+      howToFix: `Use ${getOrigin(pageUrl)}/#organization as the Organization @id and reference it from related entities.`
+    }));
+  }
+
+  return recommendations;
 }
 
 function buildGoogleEligibilityRow(pageType, productCandidates) {
@@ -447,9 +1074,10 @@ function buildRichResultWarningsRow(pageType, productCandidates) {
     };
   }
 
-  const fieldMaps = productCandidates.map(getOptionalProductFieldMap);
+  const primaryCandidate = getPrimaryProductCandidate(productCandidates);
+  const primaryFieldMap = getOptionalProductFieldMap(primaryCandidate);
   const missingFields = ['gtin13', 'color', 'material'].filter(
-    field => !fieldMaps.some(map => map[field])
+    field => !primaryFieldMap[field]
   );
 
   if (missingFields.length === 0) {
@@ -459,6 +1087,32 @@ function buildRichResultWarningsRow(pageType, productCandidates) {
       warnings: '',
       recommendation:
         'Optional product enhancement fields such as gtin13, color, and material are present.'
+    };
+  }
+
+  const duplicateFieldMaps = getDuplicateProductCandidates(
+    productCandidates,
+    primaryCandidate
+  ).map(getOptionalProductFieldMap);
+  const fieldsFoundInDuplicate = missingFields.filter(field =>
+    duplicateFieldMaps.some(map => map[field])
+  );
+  const fieldsMissingEverywhere = missingFields.filter(
+    field => !fieldsFoundInDuplicate.includes(field)
+  );
+
+  if (fieldsFoundInDuplicate.length > 0) {
+    const missingEverywhereMessage =
+      fieldsMissingEverywhere.length > 0
+        ? ` Still missing from all Product scripts: ${fieldsMissingEverywhere.join(', ')}.`
+        : '';
+
+    return {
+      type: 'Rich Result Warnings',
+      status: 'Warning',
+      warnings: missingFields.join(', '),
+      recommendation:
+        `Fields found in duplicate script, but missing from primary script: ${fieldsFoundInDuplicate.join(', ')}. Move these fields into the primary Product JSON-LD and remove conflicting duplicate Product markup.${missingEverywhereMessage}`
     };
   }
 
@@ -473,6 +1127,7 @@ function buildRichResultWarningsRow(pageType, productCandidates) {
 
 function buildOrganizationConnectionRow(
   pageType,
+  pageUrl,
   jsonLdDocuments,
   productCandidates
 ) {
@@ -485,21 +1140,13 @@ function buildOrganizationConnectionRow(
     };
   }
 
+  const expectedOrganizationId = `${getOrigin(pageUrl)}/#organization`;
   const organizationEntities = jsonLdDocuments.flatMap(document =>
     collectEntitiesByTypes(document, new Set(['Organization']))
   );
   const organizationIds = organizationEntities
     .map(candidate => getEntityId(candidate.entity))
     .filter(Boolean);
-
-  if (organizationIds.length === 0) {
-    return {
-      type: 'Organization Connection',
-      status: 'Warning',
-      recommendation:
-        'Add an Organization schema with a stable @id so product entities can stitch back to the site entity.'
-    };
-  }
 
   const linkedIds = new Set();
   productCandidates
@@ -519,13 +1166,16 @@ function buildOrganizationConnectionRow(
     };
   }
 
-  const matchedId = organizationIds.find(id => linkedIds.has(id));
+  const matchedId =
+    organizationIds.find(id => linkedIds.has(id)) ||
+    Array.from(linkedIds).find(id => id === expectedOrganizationId);
+
   if (!matchedId) {
     return {
       type: 'Organization Connection',
       status: 'Warning',
       recommendation:
-        'Product brand or manufacturer uses a different @id than the Organization schema. Reuse the Organization @id inside brand or manufacturer to stitch the entities together.'
+        `Product brand or manufacturer should reference the stable Organization @id ${expectedOrganizationId}.`
     };
   }
 
@@ -534,6 +1184,51 @@ function buildOrganizationConnectionRow(
     status: 'Pass',
     recommendation:
       `Product brand or manufacturer is stitched to the Organization schema through @id ${matchedId}.`
+  };
+}
+
+function buildEntityIdRow(pageType, pageUrl, jsonLdDocuments) {
+  const pageEntityTypes = new Set([
+    'Product',
+    'ProductGroup',
+    'CollectionPage',
+    'WebPage',
+    'Article',
+    'BlogPosting',
+    'WebSite',
+    'Organization'
+  ]);
+  const entities = jsonLdDocuments.flatMap(document =>
+    collectEntitiesByTypes(document, pageEntityTypes)
+  );
+  const primaryEntities = entities.filter(candidate =>
+    (candidate.types || []).some(type => {
+      if (pageType === 'product') return type === 'Product' || type === 'ProductGroup';
+      if (pageType === 'collection') return type === 'CollectionPage' || type === 'WebPage';
+      if (pageType === 'blog') return type === 'Article' || type === 'BlogPosting';
+      if (pageType === 'homepage') return type === 'Organization' || type === 'WebSite';
+      return type === 'WebPage';
+    })
+  );
+  const missingIds = primaryEntities
+    .filter(candidate => !getEntityId(candidate.entity))
+    .flatMap(candidate => candidate.types || []);
+
+  if (missingIds.length === 0) {
+    return {
+      type: 'Entity @id Stitching',
+      status: 'Pass',
+      recommendation:
+        'Primary schema entities use @id values that can be referenced across the site.'
+    };
+  }
+
+  return {
+    type: 'Entity @id Stitching',
+    status: 'Warning',
+    warnings: Array.from(new Set(missingIds)).join(', '),
+    recommendation:
+      'Add stable @id values such as #organization, #website, #webpage, #product, and #breadcrumb so entities can connect cleanly.'
   };
 }
 
@@ -652,6 +1347,57 @@ function buildShopifyConflictRow(productCandidates) {
   };
 }
 
+function buildBreadcrumbFormatRow(
+  jsonLdDocuments,
+  microdataItems,
+  breadcrumbUiPresent
+) {
+  const hasJsonLdBreadcrumb = hasSchemaTypeInJsonLd(
+    jsonLdDocuments,
+    'BreadcrumbList'
+  );
+  const hasMicrodataBreadcrumb = hasSchemaTypeInMicrodata(
+    microdataItems,
+    'BreadcrumbList'
+  );
+
+  if (hasJsonLdBreadcrumb) {
+    return {
+      type: 'Breadcrumb Format',
+      status: 'Pass',
+      recommendation:
+        'BreadcrumbList is implemented in JSON-LD, which is the preferred schema format.'
+    };
+  }
+
+  if (hasMicrodataBreadcrumb) {
+    return {
+      type: 'Breadcrumb Format',
+      status: 'Pass',
+      recommendation:
+        'BreadcrumbList markup is present and valid through Microdata.',
+      suggestion:
+        'JSON-LD is the preferred BreadcrumbList format for 2026 SEO standards. Consider migrating this breadcrumb markup from Microdata to JSON-LD.'
+    };
+  }
+
+  if (breadcrumbUiPresent) {
+    return {
+      type: 'Breadcrumb Format',
+      status: 'Warning',
+      recommendation:
+        'Add BreadcrumbList schema, ideally in JSON-LD, to clarify page hierarchy for search engines.'
+    };
+  }
+
+  return {
+    type: 'Breadcrumb Format',
+    status: 'Pass',
+    recommendation:
+      'No visual breadcrumb trail was detected, so BreadcrumbList markup is not required for this page.'
+  };
+}
+
 function buildSchemaScopeRow(pageType, detectedTypes) {
   const typeSet = new Set(detectedTypes || []);
   const warnings = [];
@@ -673,14 +1419,6 @@ function buildSchemaScopeRow(pageType, detectedTypes) {
       warnings.push('Article should not be global on homepage');
     }
   } else {
-    if (typeSet.has('Organization')) {
-      warnings.push('Organization should be homepage-only');
-    }
-
-    if (typeSet.has('WebSite')) {
-      warnings.push('WebSite should be homepage-only');
-    }
-
     if (typeSet.has('Product') && pageType !== 'product') {
       warnings.push('Product schema is on a non-product page');
     }
@@ -705,7 +1443,7 @@ function buildSchemaScopeRow(pageType, detectedTypes) {
     status: 'Warning',
     warnings: warnings.join(', '),
     recommendation:
-      'Keep Organization and WebSite on the homepage only, and limit Product or Article schemas to their matching product and blog pages.',
+      'Keep primary Product, Collection, and Article schemas aligned to their matching Shopify templates.',
   };
 }
 
@@ -744,8 +1482,12 @@ function buildImplementationRow({ implementationType, pageType, hasSchema }) {
 function buildSchemaAudit({
   pageType,
   source,
+  pageUrl = '',
   jsonLdDocuments = [],
   microdataItems = [],
+  breadcrumbUiPresent = false,
+  breadcrumbLinks = [],
+  jsonLdErrorCount = 0,
   visiblePrice = ''
 }) {
   const targetTypes = new Set(['Product', 'ProductGroup']);
@@ -771,24 +1513,92 @@ function buildSchemaAudit({
       ? 'App-level'
       : 'Theme-level'
     : 'Not detected';
+  const { missingRequired, missingRecommended } = getMissingSchemaGroups(
+    pageType,
+    allDetectedTypes,
+    breadcrumbUiPresent
+  );
+  const unexpectedSchemaTypes = getUnexpectedSchemaTypes(
+    pageType,
+    allDetectedTypes
+  );
+  const schemaConflicts = getSchemaConflicts(
+    pageType,
+    allDetectedTypes,
+    productCandidates
+  );
+  const generatedSchemaSamples = buildGeneratedSchemaSamples({
+    pageType,
+    pageUrl,
+    breadcrumbLinks,
+    missingRequired,
+    missingRecommended
+  });
+  const entityRows = [
+    buildOrganizationConnectionRow(
+      pageType,
+      pageUrl,
+      jsonLdDocuments,
+      productCandidates
+    ),
+    buildEntityIdRow(pageType, pageUrl, jsonLdDocuments)
+  ];
+  const richResultSummary = buildRichResultSummary({
+    pageType,
+    productCandidates,
+    detectedTypes: allDetectedTypes,
+    missingRequired,
+    missingRecommended
+  });
+  const schemaScoreBreakdown = buildSchemaScoreBreakdown({
+    missingRequired,
+    missingRecommended,
+    unexpectedSchemaTypes,
+    schemaConflicts,
+    jsonLdErrorCount,
+    implementationType
+  });
+  const rows = [
+    buildGoogleEligibilityRow(pageType, productCandidates),
+    buildRichResultWarningsRow(pageType, productCandidates),
+    buildMerchantCenterSyncRow(pageType, productCandidates, visiblePrice),
+    ...entityRows,
+    buildBreadcrumbFormatRow(
+      jsonLdDocuments,
+      microdataItems,
+      breadcrumbUiPresent
+    ),
+    buildSchemaScopeRow(pageType, allDetectedTypes),
+    buildPrimaryProductStructureRow(jsonLdDocuments),
+    buildShopifyConflictRow(productCandidates),
+    buildImplementationRow({ implementationType, pageType, hasSchema })
+  ];
+  const schemaRecommendations = buildSchemaRecommendations({
+    pageType,
+    pageUrl,
+    missingRequired,
+    missingRecommended,
+    unexpectedSchemaTypes,
+    schemaConflicts,
+    generatedSchemaSamples,
+    implementationType,
+    entityStitchingRows: entityRows
+  });
 
   return {
     implementationType,
     visiblePrice: normalizePrice(visiblePrice),
-    rows: [
-      buildGoogleEligibilityRow(pageType, productCandidates),
-      buildRichResultWarningsRow(pageType, productCandidates),
-      buildMerchantCenterSyncRow(pageType, productCandidates, visiblePrice),
-      buildOrganizationConnectionRow(
-        pageType,
-        jsonLdDocuments,
-        productCandidates
-      ),
-      buildSchemaScopeRow(pageType, allDetectedTypes),
-      buildPrimaryProductStructureRow(jsonLdDocuments),
-      buildShopifyConflictRow(productCandidates),
-      buildImplementationRow({ implementationType, pageType, hasSchema })
-    ]
+    detectedSchemaTypes: allDetectedTypes,
+    expectedSchemaTypes: listExpectedSchemaTypes(pageType),
+    missingRequiredSchema: missingRequired,
+    missingRecommendedSchema: missingRecommended,
+    unexpectedSchemaTypes,
+    schemaConflicts,
+    richResultSummary,
+    schemaRecommendations,
+    generatedSchemaSamples,
+    schemaScoreBreakdown,
+    rows
   };
 }
 
