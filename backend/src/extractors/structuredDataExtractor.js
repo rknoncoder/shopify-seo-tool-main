@@ -2,7 +2,8 @@ const cheerio = require('cheerio');
 const {
   extractMicrodataItems,
   buildSchemaAudit,
-  normalizePrice
+  normalizePrice,
+  normalizeAvailability
 } = require('../audits/schemaAudit');
 const { detectShopifyPageType } = require('../utils/pageTypeDetector');
 
@@ -69,6 +70,53 @@ function extractVisiblePrice($) {
   const bodyText = $('body').text().replace(/\s+/g, ' ').trim();
   const fallbackMatch = bodyText.match(/(?:Rs\.?|INR)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/i);
   return fallbackMatch ? normalizePrice(fallbackMatch[1]) : '';
+}
+
+function extractVisibleAvailability($) {
+  const selectors = [
+    '[itemprop="availability"]',
+    '[data-product-availability]',
+    '[data-availability]',
+    '[data-stock]',
+    '.product__inventory',
+    '.inventory',
+    '.stock',
+    '.availability',
+    '.sold-out',
+    '.product-form__submit',
+    'button[name="add"]',
+    'button[type="submit"]'
+  ];
+
+  for (const selector of selectors) {
+    const values = $(selector)
+      .map((_, element) => {
+        const node = $(element);
+        const text = [
+          node.attr('content'),
+          node.attr('data-product-availability'),
+          node.attr('data-availability'),
+          node.attr('data-stock'),
+          node.attr('aria-label'),
+          node.attr('value'),
+          node.text(),
+          node.attr('disabled') !== undefined ? 'sold out' : ''
+        ]
+          .filter(Boolean)
+          .join(' ');
+
+        return normalizeAvailability(text);
+      })
+      .get()
+      .filter(Boolean);
+
+    if (values.length > 0) {
+      return values[0];
+    }
+  }
+
+  const bodyText = $('body').text().replace(/\s+/g, ' ').trim();
+  return normalizeAvailability(bodyText.match(/sold out|out of stock|pre-?order|back-?order/i)?.[0] || '');
 }
 
 function toBreadcrumbLabel(segment) {
@@ -457,7 +505,8 @@ function buildStructuredDataResult(
   pageUrl,
   breadcrumbTrail = { present: false, links: [] },
   microdataItems = [],
-  visiblePrice = ''
+  visiblePrice = '',
+  visibleAvailability = ''
 ) {
   const normalizedBreadcrumbTrail =
     typeof breadcrumbTrail === 'boolean'
@@ -508,7 +557,25 @@ function buildStructuredDataResult(
     breadcrumbUiPresent,
     breadcrumbLinks: normalizedBreadcrumbTrail.links || [],
     jsonLdErrorCount: parseResult.errors.length,
-    visiblePrice
+    visiblePrice,
+    visibleAvailability
+  });
+
+  (schemaAudit.consistencyWarnings || []).forEach(warning => {
+    issues.push({
+      type: warning.type || 'schema-ui-consistency',
+      severity: warning.priority === 'high' ? 'high' : 'warning',
+      message: warning.issue,
+      recommendation: warning.howToFix,
+      details: {
+        schemaPrice: schemaAudit.schemaPrice || '',
+        visiblePrice: schemaAudit.visiblePrice || '',
+        priceMatchStatus: schemaAudit.priceMatchStatus || '',
+        schemaAvailability: schemaAudit.schemaAvailability || '',
+        visibleAvailability: schemaAudit.visibleAvailability || '',
+        availabilityMatchStatus: schemaAudit.availabilityMatchStatus || ''
+      }
+    });
   });
 
   const generatedSchemaSamples = {
@@ -548,6 +615,12 @@ function buildStructuredDataResult(
     richResultSummary: schemaAudit.richResultSummary || {},
     schemaRecommendations: schemaAudit.schemaRecommendations || [],
     schemaScoreBreakdown: schemaAudit.schemaScoreBreakdown || {},
+    schemaPrice: schemaAudit.schemaPrice || '',
+    priceMatchStatus: schemaAudit.priceMatchStatus || '',
+    schemaAvailability: schemaAudit.schemaAvailability || '',
+    visibleAvailability: schemaAudit.visibleAvailability || '',
+    availabilityMatchStatus: schemaAudit.availabilityMatchStatus || '',
+    consistencyWarnings: schemaAudit.consistencyWarnings || [],
     visiblePrice: normalizePrice(visiblePrice) || '',
     totalDetectedItems:
       parseResult.schemaObjectCount + microdataItems.length > 0
@@ -568,6 +641,7 @@ function extractStructuredDataFromHtml(html, pageType, pageUrl = '') {
   const breadcrumbTrail = extractBreadcrumbTrailFromCheerio($, pageUrl);
   const microdataItems = extractMicrodataItems($);
   const visiblePrice = extractVisiblePrice($);
+  const visibleAvailability = extractVisibleAvailability($);
 
   return buildStructuredDataResult(
     effectivePageType,
@@ -576,7 +650,8 @@ function extractStructuredDataFromHtml(html, pageType, pageUrl = '') {
     pageUrl,
     breadcrumbTrail,
     microdataItems,
-    visiblePrice
+    visiblePrice,
+    visibleAvailability
   );
 }
 
@@ -662,6 +737,7 @@ async function extractStructuredDataWithPuppeteer(url, pageType) {
     const rendered$ = cheerio.load(renderedHtml);
     const renderedMicrodataItems = extractMicrodataItems(rendered$);
     const breadcrumbTrail = extractBreadcrumbTrailFromCheerio(rendered$, url);
+    const visibleAvailability = extractVisibleAvailability(rendered$);
 
     return buildStructuredDataResult(
       pageType,
@@ -670,7 +746,8 @@ async function extractStructuredDataWithPuppeteer(url, pageType) {
       url,
       breadcrumbTrail,
       renderedMicrodataItems,
-      normalizePrice(renderedData.visiblePrice) || ''
+      normalizePrice(renderedData.visiblePrice) || '',
+      visibleAvailability
     );
   } catch (error) {
     return {

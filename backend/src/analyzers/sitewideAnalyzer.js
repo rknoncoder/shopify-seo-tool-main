@@ -330,7 +330,7 @@ function analyzeStructuredData(pages) {
         severity: issue.severity,
         message: issue.message,
         details: issue.details || {},
-        recommendation: getStructuredDataRecommendation(issue.type)
+        recommendation: issue.recommendation || getStructuredDataRecommendation(issue.type)
       }, findings);
     });
 

@@ -290,6 +290,52 @@ function normalizePrice(value) {
   return Number.isFinite(parsed) ? parsed.toFixed(2) : null;
 }
 
+function normalizeAvailability(value) {
+  const text = String(value || '')
+    .replace(/^https?:\/\/schema\.org\//i, '')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+
+  if (!text) {
+    return '';
+  }
+
+  if (/(out of stock|sold out|unavailable|discontinued)/i.test(text)) {
+    return 'out_of_stock';
+  }
+
+  if (/(pre order|preorder|pre sale|presale)/i.test(text)) {
+    return 'preorder';
+  }
+
+  if (/(back order|backorder)/i.test(text)) {
+    return 'backorder';
+  }
+
+  if (/(in stock|instock|available|add to cart|buy now)/i.test(text)) {
+    return 'in_stock';
+  }
+
+  return '';
+}
+
+function uniqueValues(values = []) {
+  return Array.from(new Set(values.filter(Boolean)));
+}
+
+function getOfferValues(entity, key) {
+  const offers = entity?.offers;
+
+  if (Array.isArray(offers)) {
+    return offers.map(offer => offer?.[key]).filter(Boolean);
+  }
+
+  return offers?.[key] ? [offers[key]] : [];
+}
+
 function getSchemaPrice(candidate) {
   if (!candidate) {
     return null;
@@ -303,6 +349,66 @@ function getSchemaPrice(candidate) {
   return normalizePrice(
     readJsonLdField(entity, 'price') || readOfferField(entity, 'price')
   );
+}
+
+function getSchemaPrices(candidate) {
+  if (!candidate) {
+    return [];
+  }
+
+  if (candidate.source === 'microdata') {
+    return uniqueValues((candidate.properties?.price || []).map(normalizePrice));
+  }
+
+  const entity = candidate.entity || {};
+  return uniqueValues([
+    normalizePrice(readJsonLdField(entity, 'price')),
+    ...getOfferValues(entity, 'price').map(normalizePrice),
+    ...getOfferValues(entity, 'lowPrice').map(normalizePrice),
+    ...getOfferValues(entity, 'highPrice').map(normalizePrice)
+  ]);
+}
+
+function getSchemaAvailability(candidate) {
+  if (!candidate) {
+    return '';
+  }
+
+  if (candidate.source === 'microdata') {
+    return normalizeAvailability(candidate.properties?.availability?.[0]);
+  }
+
+  const entity = candidate.entity || {};
+  return normalizeAvailability(
+    readJsonLdField(entity, 'availability') ||
+      readOfferField(entity, 'availability')
+  );
+}
+
+function getSchemaAvailabilities(candidate) {
+  if (!candidate) {
+    return [];
+  }
+
+  if (candidate.source === 'microdata') {
+    return uniqueValues(
+      (candidate.properties?.availability || []).map(normalizeAvailability)
+    );
+  }
+
+  const entity = candidate.entity || {};
+  return uniqueValues([
+    normalizeAvailability(readJsonLdField(entity, 'availability')),
+    ...getOfferValues(entity, 'availability').map(normalizeAvailability)
+  ]);
+}
+
+function getAllSchemaPrices(productCandidates = []) {
+  return uniqueValues(productCandidates.flatMap(getSchemaPrices));
+}
+
+function getAllSchemaAvailabilities(productCandidates = []) {
+  return uniqueValues(productCandidates.flatMap(getSchemaAvailabilities));
 }
 
 function normalizeEntityId(value) {
@@ -781,11 +887,158 @@ function buildRichResultSummary({
   };
 }
 
+function getMatchStatus({ primaryValue, allValues, visibleValue }) {
+  if (!primaryValue && allValues.length === 0) {
+    return 'schema_missing';
+  }
+
+  if (!visibleValue) {
+    return 'ui_missing';
+  }
+
+  if (primaryValue === visibleValue) {
+    return 'match';
+  }
+
+  if (allValues.length > 1 && allValues.includes(visibleValue)) {
+    return 'variant_match';
+  }
+
+  return 'mismatch';
+}
+
+function buildSchemaUiConsistency({
+  pageType,
+  productCandidates,
+  visiblePrice,
+  visibleAvailability
+}) {
+  if (pageType !== 'product') {
+    return {
+      schemaPrice: '',
+      visiblePrice: normalizePrice(visiblePrice) || '',
+      priceMatchStatus: 'not_applicable',
+      schemaAvailability: '',
+      visibleAvailability: normalizeAvailability(visibleAvailability) || '',
+      availabilityMatchStatus: 'not_applicable',
+      consistencyWarnings: []
+    };
+  }
+
+  const primaryCandidate = getPrimaryProductCandidate(productCandidates);
+  const schemaPrice = getSchemaPrice(primaryCandidate) || '';
+  const allSchemaPrices = getAllSchemaPrices(productCandidates);
+  const normalizedVisiblePrice = normalizePrice(visiblePrice) || '';
+  const schemaAvailability = getSchemaAvailability(primaryCandidate) || '';
+  const allSchemaAvailabilities = getAllSchemaAvailabilities(productCandidates);
+  const normalizedVisibleAvailability =
+    normalizeAvailability(visibleAvailability) || '';
+  const priceMatchStatus = getMatchStatus({
+    primaryValue: schemaPrice,
+    allValues: allSchemaPrices,
+    visibleValue: normalizedVisiblePrice
+  });
+  const availabilityMatchStatus = getMatchStatus({
+    primaryValue: schemaAvailability,
+    allValues: allSchemaAvailabilities,
+    visibleValue: normalizedVisibleAvailability
+  });
+  const consistencyWarnings = [];
+
+  if (priceMatchStatus === 'mismatch') {
+    const variantSensitive = allSchemaPrices.length > 1;
+    consistencyWarnings.push({
+      priority: variantSensitive ? 'medium' : 'high',
+      type: 'price_mismatch',
+      issue: variantSensitive
+        ? 'Visible price does not match any detected schema variant price'
+        : 'Schema price does not match visible product price',
+      whyItMatters:
+        'Google Merchant Center and product rich results rely on price parity between structured data and the visible product UI.',
+      howToFix:
+        'Sync the primary Product/Offer price with the selected visible variant price, or expose all variant offers accurately in ProductGroup/Offer markup.'
+    });
+  }
+
+  if (priceMatchStatus === 'schema_missing') {
+    consistencyWarnings.push({
+      priority: 'high',
+      type: 'price_schema_missing',
+      issue: 'Schema price is missing',
+      whyItMatters:
+        'Product rich result eligibility requires a valid Offer price.',
+      howToFix: 'Add offers.price to the primary Product JSON-LD.'
+    });
+  }
+
+  if (priceMatchStatus === 'ui_missing') {
+    consistencyWarnings.push({
+      priority: 'medium',
+      type: 'price_ui_missing',
+      issue: 'Visible product price could not be confidently detected',
+      whyItMatters:
+        'Automated price parity checks need a clear primary price in the UI.',
+      howToFix:
+        'Expose the selected variant price in a stable price element or data attribute.'
+    });
+  }
+
+  if (availabilityMatchStatus === 'mismatch') {
+    const variantSensitive = allSchemaAvailabilities.length > 1;
+    consistencyWarnings.push({
+      priority: variantSensitive ? 'medium' : 'high',
+      type: 'availability_mismatch',
+      issue: variantSensitive
+        ? 'Visible stock state does not match any detected schema variant availability'
+        : 'Schema availability does not match visible stock state',
+      whyItMatters:
+        'Availability mismatches can create misleading rich results and Merchant Center disapproval risk.',
+      howToFix:
+        'Sync offers.availability with the selected visible variant state, or model variant availability consistently.'
+    });
+  }
+
+  if (availabilityMatchStatus === 'schema_missing') {
+    consistencyWarnings.push({
+      priority: 'high',
+      type: 'availability_schema_missing',
+      issue: 'Schema availability is missing',
+      whyItMatters:
+        'Product rich result eligibility expects Offer availability.',
+      howToFix:
+        'Add offers.availability with a schema.org URL such as https://schema.org/InStock.'
+    });
+  }
+
+  if (availabilityMatchStatus === 'ui_missing') {
+    consistencyWarnings.push({
+      priority: 'medium',
+      type: 'availability_ui_missing',
+      issue: 'Visible stock state could not be confidently detected',
+      whyItMatters:
+        'Availability parity checks need a visible in-stock, out-of-stock, preorder, or backorder state.',
+      howToFix:
+        'Expose stock state in visible product text, inventory messaging, or add-to-cart button state.'
+    });
+  }
+
+  return {
+    schemaPrice,
+    visiblePrice: normalizedVisiblePrice,
+    priceMatchStatus,
+    schemaAvailability,
+    visibleAvailability: normalizedVisibleAvailability,
+    availabilityMatchStatus,
+    consistencyWarnings
+  };
+}
+
 function buildSchemaScoreBreakdown({
   missingRequired,
   missingRecommended,
   unexpectedSchemaTypes,
   schemaConflicts,
+  consistencyWarnings,
   jsonLdErrorCount,
   implementationType
 }) {
@@ -831,6 +1084,14 @@ function buildSchemaScoreBreakdown({
     });
   });
 
+  (consistencyWarnings || []).forEach(warning => {
+    deductions.push({
+      category: 'Schema/UI consistency',
+      points: warning.priority === 'high' ? 15 : 8,
+      reason: warning.issue
+    });
+  });
+
   if (implementationType === 'App-level') {
     deductions.push({
       category: 'Implementation source',
@@ -857,6 +1118,7 @@ function buildSchemaRecommendations({
   missingRecommended,
   unexpectedSchemaTypes,
   schemaConflicts,
+  consistencyWarnings,
   generatedSchemaSamples,
   implementationType,
   entityStitchingRows
@@ -922,6 +1184,15 @@ function buildSchemaRecommendations({
 
   schemaConflicts.forEach(conflict => {
     recommendations.push(createSchemaRecommendation(conflict));
+  });
+
+  (consistencyWarnings || []).forEach(warning => {
+    recommendations.push(createSchemaRecommendation({
+      priority: warning.priority,
+      issue: warning.issue,
+      whyItMatters: warning.whyItMatters,
+      howToFix: warning.howToFix
+    }));
   });
 
   entityStitchingRows
@@ -1005,7 +1276,7 @@ function buildGoogleEligibilityRow(pageType, productCandidates) {
   };
 }
 
-function buildMerchantCenterSyncRow(pageType, productCandidates, visiblePrice) {
+function buildMerchantCenterSyncRow(pageType, consistencyResult) {
   if (pageType !== 'product') {
     return {
       type: 'Price/Availability Match',
@@ -1015,33 +1286,30 @@ function buildMerchantCenterSyncRow(pageType, productCandidates, visiblePrice) {
     };
   }
 
-  const schemaPrice = productCandidates.map(getSchemaPrice).find(Boolean);
-  const normalizedVisiblePrice = normalizePrice(visiblePrice);
+  const blockingWarnings = (consistencyResult.consistencyWarnings || []).filter(
+    warning => warning.priority === 'high'
+  );
+  const cautionWarnings = (consistencyResult.consistencyWarnings || []).filter(
+    warning => warning.priority !== 'high'
+  );
 
-  if (!schemaPrice) {
+  if (blockingWarnings.length > 0) {
     return {
       type: 'Price/Availability Match',
       status: 'Error',
+      warnings: blockingWarnings.map(warning => warning.issue).join(' | '),
       recommendation:
-        'Add a valid Product price in schema markup so Merchant Center can verify the offer.'
+        blockingWarnings.map(warning => warning.howToFix).join(' | ')
     };
   }
 
-  if (!normalizedVisiblePrice) {
+  if (cautionWarnings.length > 0) {
     return {
       type: 'Price/Availability Match',
       status: 'Warning',
+      warnings: cautionWarnings.map(warning => warning.issue).join(' | '),
       recommendation:
-        'Expose a clear visible product price in the page content so Merchant Center can verify it against schema.'
-    };
-  }
-
-  if (schemaPrice !== normalizedVisiblePrice) {
-    return {
-      type: 'Price/Availability Match',
-      status: 'Error',
-      recommendation:
-        `Schema price (${schemaPrice}) does not match the visible page price (${normalizedVisiblePrice}). Sync them to avoid Google Merchant Center disapproval or suspension risk.`
+        cautionWarnings.map(warning => warning.howToFix).join(' | ')
     };
   }
 
@@ -1049,7 +1317,7 @@ function buildMerchantCenterSyncRow(pageType, productCandidates, visiblePrice) {
     type: 'Price/Availability Match',
     status: 'Pass',
     recommendation:
-      'Visible price matches the Product schema price, which is aligned for Merchant Center checks.'
+      'Visible product price and availability are aligned with Product schema, or match a detected variant offer.'
   };
 }
 
@@ -1488,7 +1756,8 @@ function buildSchemaAudit({
   breadcrumbUiPresent = false,
   breadcrumbLinks = [],
   jsonLdErrorCount = 0,
-  visiblePrice = ''
+  visiblePrice = '',
+  visibleAvailability = ''
 }) {
   const targetTypes = new Set(['Product', 'ProductGroup']);
   const jsonLdProductCandidates = jsonLdDocuments.flatMap(document =>
@@ -1527,6 +1796,12 @@ function buildSchemaAudit({
     allDetectedTypes,
     productCandidates
   );
+  const consistencyResult = buildSchemaUiConsistency({
+    pageType,
+    productCandidates,
+    visiblePrice,
+    visibleAvailability
+  });
   const generatedSchemaSamples = buildGeneratedSchemaSamples({
     pageType,
     pageUrl,
@@ -1555,13 +1830,14 @@ function buildSchemaAudit({
     missingRecommended,
     unexpectedSchemaTypes,
     schemaConflicts,
+    consistencyWarnings: consistencyResult.consistencyWarnings,
     jsonLdErrorCount,
     implementationType
   });
   const rows = [
     buildGoogleEligibilityRow(pageType, productCandidates),
     buildRichResultWarningsRow(pageType, productCandidates),
-    buildMerchantCenterSyncRow(pageType, productCandidates, visiblePrice),
+    buildMerchantCenterSyncRow(pageType, consistencyResult),
     ...entityRows,
     buildBreadcrumbFormatRow(
       jsonLdDocuments,
@@ -1580,6 +1856,7 @@ function buildSchemaAudit({
     missingRecommended,
     unexpectedSchemaTypes,
     schemaConflicts,
+    consistencyWarnings: consistencyResult.consistencyWarnings,
     generatedSchemaSamples,
     implementationType,
     entityStitchingRows: entityRows
@@ -1598,6 +1875,7 @@ function buildSchemaAudit({
     schemaRecommendations,
     generatedSchemaSamples,
     schemaScoreBreakdown,
+    ...consistencyResult,
     rows
   };
 }
@@ -1605,5 +1883,6 @@ function buildSchemaAudit({
 module.exports = {
   extractMicrodataItems,
   buildSchemaAudit,
-  normalizePrice
+  normalizePrice,
+  normalizeAvailability
 };
