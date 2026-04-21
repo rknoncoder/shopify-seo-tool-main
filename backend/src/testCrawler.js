@@ -4,7 +4,7 @@ const analyzeSitewideData = require('./analyzers/sitewideAnalyzer');
 const exportAuditToExcel = require('./exporters/excelExporter');
 
 (async () => {
-  const crawlUrl = process.env.AUDIT_URL || 'https://www.triprindia.com';
+  const crawlUrl = process.env.AUDIT_URL || 'https://www.nobero.com';
   const crawlResult = await startCrawler([], crawlUrl);
   const results = crawlResult.pages || [];
   const sitewideData = analyzeSitewideData(results);
@@ -44,7 +44,11 @@ const exportAuditToExcel = require('./exporters/excelExporter');
     schemaScoreBreakdown: page.structuredDataReport.schemaScoreBreakdown,
     schemaPrice: page.structuredDataReport.schemaPrice,
     visiblePrice: page.structuredDataReport.visiblePrice,
+    visiblePriceSource: page.structuredDataReport.visiblePriceSource,
+    rawShopifyPrice: page.structuredDataReport.rawShopifyPrice,
     priceMatchStatus: page.structuredDataReport.priceMatchStatus,
+    priceUnitStatus: page.structuredDataReport.priceUnitStatus,
+    priceDebugNote: page.structuredDataReport.priceDebugNote,
     schemaAvailability: page.structuredDataReport.schemaAvailability,
     visibleAvailability: page.structuredDataReport.visibleAvailability,
     availabilityMatchStatus: page.structuredDataReport.availabilityMatchStatus,

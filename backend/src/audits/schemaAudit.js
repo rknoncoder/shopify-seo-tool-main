@@ -263,8 +263,20 @@ function getOptionalProductFieldMap(candidate) {
 }
 
 function getPrimaryProductCandidate(productCandidates = []) {
+  const jsonLdCandidates = productCandidates.filter(
+    candidate => candidate.source === 'json-ld'
+  );
+  const pricedJsonLdCandidate = jsonLdCandidates.find(candidate =>
+    Boolean(getSchemaPrice(candidate))
+  );
+
+  if (pricedJsonLdCandidate) {
+    return pricedJsonLdCandidate;
+  }
+
   return (
-    productCandidates.find(candidate => candidate.source === 'json-ld') ||
+    jsonLdCandidates[0] ||
+    productCandidates.find(candidate => Boolean(getSchemaPrice(candidate))) ||
     productCandidates[0] ||
     null
   );
@@ -288,6 +300,29 @@ function normalizePrice(value) {
 
   const parsed = Number(match[0]);
   return Number.isFinite(parsed) ? parsed.toFixed(2) : null;
+}
+
+function parsePriceNumber(value) {
+  const normalized = normalizePrice(value);
+  return normalized ? Number(normalized) : null;
+}
+
+function parseRawShopifyPriceNumber(value) {
+  const match = String(value || '').replace(/,/g, '').match(/\d+(?:\.\d+)?/);
+  if (!match) {
+    return null;
+  }
+
+  const parsed = Number(match[0]);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function pricesAreEqual(left, right) {
+  if (left === null || right === null) {
+    return false;
+  }
+
+  return Math.abs(left - right) < 0.01;
 }
 
 function normalizeAvailability(value) {
@@ -900,24 +935,82 @@ function getMatchStatus({ primaryValue, allValues, visibleValue }) {
     return 'match';
   }
 
-  if (allValues.length > 1 && allValues.includes(visibleValue)) {
+  if (allValues.includes(visibleValue)) {
     return 'variant_match';
   }
 
   return 'mismatch';
 }
 
+function buildPriceUnitAnalysis({
+  schemaPrice,
+  visiblePrice,
+  rawShopifyPrice,
+  priceMatchStatus
+}) {
+  const rawNumber = parseRawShopifyPriceNumber(rawShopifyPrice);
+  const schemaNumber = parsePriceNumber(schemaPrice);
+  const visibleNumber = parsePriceNumber(visiblePrice);
+  const comparisonNumber = schemaNumber ?? visibleNumber;
+
+  if (priceMatchStatus === 'mismatch') {
+    return {
+      rawShopifyPrice: rawShopifyPrice || '',
+      priceUnitStatus: 'real_mismatch',
+      priceDebugNote:
+        'Schema price and visible UI price differ in business value. Review Product/Offer schema and the selected Shopify variant price.'
+    };
+  }
+
+  if (!rawShopifyPrice || rawNumber === null || comparisonNumber === null) {
+    return {
+      rawShopifyPrice: rawShopifyPrice || '',
+      priceUnitStatus: 'unknown',
+      priceDebugNote: ''
+    };
+  }
+
+  if (pricesAreEqual(rawNumber, comparisonNumber)) {
+    return {
+      rawShopifyPrice,
+      priceUnitStatus: 'match',
+      priceDebugNote:
+        'Raw Shopify/app price uses the same major-unit format as schema/UI price.'
+    };
+  }
+
+  if (pricesAreEqual(rawNumber / 100, comparisonNumber)) {
+    return {
+      rawShopifyPrice,
+      priceUnitStatus: 'unit_mismatch',
+      priceDebugNote:
+        `Raw Shopify/app price appears to use minor units (${rawShopifyPrice}) while schema/UI use major units (${comparisonNumber.toFixed(2)}). This is a unit-format difference, not necessarily a schema/UI mismatch.`
+    };
+  }
+
+  return {
+    rawShopifyPrice,
+    priceUnitStatus: 'unknown',
+    priceDebugNote:
+      `Raw Shopify/app price (${rawShopifyPrice}) does not clearly match schema/UI price (${comparisonNumber.toFixed(2)}) as either major units or Shopify minor units.`
+  };
+}
+
 function buildSchemaUiConsistency({
   pageType,
   productCandidates,
   visiblePrice,
-  visibleAvailability
+  visibleAvailability,
+  rawShopifyPrice
 }) {
   if (pageType !== 'product') {
     return {
       schemaPrice: '',
       visiblePrice: normalizePrice(visiblePrice) || '',
+      rawShopifyPrice: rawShopifyPrice || '',
       priceMatchStatus: 'not_applicable',
+      priceUnitStatus: 'unknown',
+      priceDebugNote: '',
       schemaAvailability: '',
       visibleAvailability: normalizeAvailability(visibleAvailability) || '',
       availabilityMatchStatus: 'not_applicable',
@@ -933,10 +1026,20 @@ function buildSchemaUiConsistency({
   const allSchemaAvailabilities = getAllSchemaAvailabilities(productCandidates);
   const normalizedVisibleAvailability =
     normalizeAvailability(visibleAvailability) || '';
-  const priceMatchStatus = getMatchStatus({
+  const rawPriceMatchStatus = getMatchStatus({
     primaryValue: schemaPrice,
     allValues: allSchemaPrices,
     visibleValue: normalizedVisiblePrice
+  });
+  const priceMatchStatus =
+    rawPriceMatchStatus === 'match' || rawPriceMatchStatus === 'variant_match'
+      ? 'pass'
+      : rawPriceMatchStatus;
+  const priceUnitAnalysis = buildPriceUnitAnalysis({
+    schemaPrice,
+    visiblePrice: normalizedVisiblePrice,
+    rawShopifyPrice,
+    priceMatchStatus
   });
   const availabilityMatchStatus = getMatchStatus({
     primaryValue: schemaAvailability,
@@ -983,6 +1086,17 @@ function buildSchemaUiConsistency({
     });
   }
 
+  if (priceUnitAnalysis.priceUnitStatus === 'unit_mismatch') {
+    consistencyWarnings.push({
+      priority: 'low',
+      type: 'raw_shopify_price_unit_mismatch',
+      issue: 'Raw Shopify/app price appears to use minor units',
+      whyItMatters:
+        'Shopify app payloads often store prices in cents/minor units, while schema and UI should show customer-facing major units.',
+      howToFix: priceUnitAnalysis.priceDebugNote
+    });
+  }
+
   if (availabilityMatchStatus === 'mismatch') {
     const variantSensitive = allSchemaAvailabilities.length > 1;
     consistencyWarnings.push({
@@ -1025,7 +1139,10 @@ function buildSchemaUiConsistency({
   return {
     schemaPrice,
     visiblePrice: normalizedVisiblePrice,
+    rawShopifyPrice: priceUnitAnalysis.rawShopifyPrice,
     priceMatchStatus,
+    priceUnitStatus: priceUnitAnalysis.priceUnitStatus,
+    priceDebugNote: priceUnitAnalysis.priceDebugNote,
     schemaAvailability,
     visibleAvailability: normalizedVisibleAvailability,
     availabilityMatchStatus,
@@ -1085,9 +1202,16 @@ function buildSchemaScoreBreakdown({
   });
 
   (consistencyWarnings || []).forEach(warning => {
+    const points =
+      warning.type === 'raw_shopify_price_unit_mismatch'
+        ? 0
+        : warning.priority === 'high'
+          ? 15
+          : 8;
+
     deductions.push({
       category: 'Schema/UI consistency',
-      points: warning.priority === 'high' ? 15 : 8,
+      points,
       reason: warning.issue
     });
   });
@@ -1757,7 +1881,8 @@ function buildSchemaAudit({
   breadcrumbLinks = [],
   jsonLdErrorCount = 0,
   visiblePrice = '',
-  visibleAvailability = ''
+  visibleAvailability = '',
+  rawShopifyPrice = ''
 }) {
   const targetTypes = new Set(['Product', 'ProductGroup']);
   const jsonLdProductCandidates = jsonLdDocuments.flatMap(document =>
@@ -1800,7 +1925,8 @@ function buildSchemaAudit({
     pageType,
     productCandidates,
     visiblePrice,
-    visibleAvailability
+    visibleAvailability,
+    rawShopifyPrice
   });
   const generatedSchemaSamples = buildGeneratedSchemaSamples({
     pageType,

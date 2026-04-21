@@ -44,32 +44,341 @@ const SCHEMA_ALIASES = {
 };
 
 
-function extractVisiblePrice($) {
-  const selectors = [
-    '[itemprop="price"]',
-    '[data-product-price]',
-    '[data-testid*="price" i]',
-    '.price-item--regular',
-    '.price-item',
-    '.product__price',
-    '.price',
-    '.money'
+const PRICE_CANDIDATE_SELECTORS = [
+  { selector: '[itemprop="price"]', source: 'itemprop=price', score: 120, allowPlainNumber: true },
+  { selector: '[data-product-price]', source: 'data-product-price', score: 115, allowPlainNumber: true },
+  { selector: '[data-price]', source: 'data-price', score: 105, allowPlainNumber: true },
+  { selector: '[data-testid*="price" i]', source: 'data-testid-price', score: 95 },
+  { selector: '.product__info-container .price-item--sale', source: 'product-info sale price', score: 110, allowPlainNumber: true },
+  { selector: '.product__info-container .price-item--regular', source: 'product-info regular price', score: 105, allowPlainNumber: true },
+  { selector: '.product__info-container .price', source: 'product-info price', score: 100 },
+  { selector: '.product-form .price', source: 'product-form price', score: 95 },
+  { selector: '.product__price', source: 'product price', score: 95, allowPlainNumber: true },
+  { selector: '.price__sale .price-item--sale', source: 'sale price item', score: 92, allowPlainNumber: true },
+  { selector: '.price-item--sale', source: 'sale price item', score: 90, allowPlainNumber: true },
+  { selector: '.price-item--regular', source: 'regular price item', score: 85, allowPlainNumber: true },
+  { selector: '.price-item', source: 'price item', score: 75, allowPlainNumber: true },
+  { selector: '.price', source: 'price class', score: 65 },
+  { selector: '.money', source: 'money class', score: 60 }
+];
+
+function normalizeText(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function hasCurrencyPrice(text) {
+  return /(?:₹|rs\.?|inr)\s*[0-9]/i.test(text) || /[0-9][0-9,]*(?:\.\d{1,2})?\s*(?:₹|rs\.?|inr)/i.test(text);
+}
+
+function extractCurrencyPriceTokens(text) {
+  const normalized = normalizeText(text);
+  const tokens = [];
+  const patterns = [
+    /(?:₹|rs\.?|inr)\s*([0-9][0-9,]*(?:\.\d{1,2})?)/gi,
+    /([0-9][0-9,]*(?:\.\d{1,2})?)\s*(?:₹|rs\.?|inr)/gi
   ];
 
-  for (const selector of selectors) {
-    const values = $(selector)
-      .map((_, element) => normalizePrice($(element).attr('content') || $(element).text()))
-      .get()
-      .filter(Boolean);
+  patterns.forEach(pattern => {
+    let match;
+    while ((match = pattern.exec(normalized)) !== null) {
+      tokens.push({
+        raw: match[0],
+        value: normalizePrice(match[1]),
+        index: match.index
+      });
+    }
+  });
 
-    if (values.length > 0) {
-      return values[0];
+  return tokens.filter(token => token.value);
+}
+
+function hasRejectedPriceContext(text) {
+  return /(lowest\s+price\s+in\s+last\s+\d+\s+days|last\s+\d+\s+days|\b\d+\s+days\b|countdown|timer|hurry|offer\s+ending|coupon|promo\s+code|code\s*:|free\s+return|people\s+bought|save\s+extra|as\s+low\s+as|get\s+it\s+for|final\s+price|pick\s+any|buy\s+\d+|flat\s+\d+%|\boff\b|discount)/i.test(text);
+}
+
+function hasRejectedCurrencyTokenContext(text, token) {
+  const normalized = normalizeText(text);
+  const tokenStart = Math.max(0, token.index || 0);
+  const tokenEnd = tokenStart + String(token.raw || '').length;
+  const before = normalized.slice(Math.max(0, tokenStart - 70), tokenStart);
+  const after = normalized.slice(tokenEnd, Math.min(normalized.length, tokenEnd + 70));
+  const localContext = `${before} ${after}`;
+
+  // Discount amounts usually read "₹400 OFF"; do not let them beat the selling price.
+  if (/^\s*(?:off|discount|cashback|saved?|extra|back)\b/i.test(after)) {
+    return true;
+  }
+
+  // Offer/coupon/final-price widgets often include lower calculated prices that are not
+  // the primary visible product price shown beside the title and variant selector.
+  if (/(as\s+low\s+as|get\s+it\s+for|final\s+price|minimum\s+cart|cashback|coupon|promo|code\s*:|offer\s+t&c|offer\s+will|save\s+extra)\s*$/i.test(before)) {
+    return true;
+  }
+
+  if (/(sale\s+ends|countdown|timer|offer\s+ending|hurry)\b/i.test(localContext)) {
+    return true;
+  }
+
+  return false;
+}
+
+function hasMrpContext(text, element) {
+  const classSource = normalizeText(
+    `${element?.attribs?.class || ''} ${element?.attribs?.id || ''}`
+  );
+  return /(mrp|compare|compare-at|was-price|old-price|strike|strikethrough|line-through)/i.test(`${text} ${classSource}`);
+}
+
+function getElementContext($, element) {
+  const node = $(element);
+  const ownText = normalizeText(node.attr('content') || node.attr('data-product-price') || node.attr('data-price') || node.text());
+  const classSource = normalizeText(
+    [
+      node.attr('class'),
+      node.attr('id'),
+      node.parent().attr('class'),
+      node.parent().attr('id'),
+      node.closest('[class*="product" i], [class*="price" i], [class*="cart" i], [class*="offer" i]').attr('class')
+    ].join(' ')
+  );
+
+  return {
+    ownText,
+    classSource,
+    combined: `${ownText} ${classSource}`
+  };
+}
+
+function scorePriceCandidate({ $, element, selectorConfig, token, candidateText }) {
+  const context = element
+    ? getElementContext($, element)
+    : { ownText: candidateText, classSource: '', combined: candidateText };
+  const directText = context.ownText || candidateText;
+  const shouldUseTokenAwareContext =
+    selectorConfig?.tokenAwareOnly ||
+    extractCurrencyPriceTokens(directText).length > 1;
+
+  if (shouldUseTokenAwareContext) {
+    if (hasRejectedCurrencyTokenContext(directText, token)) {
+      return null;
+    }
+  } else if (hasRejectedPriceContext(directText)) {
+    return null;
+  }
+
+  const isMrp = hasMrpContext(directText, element);
+  const hasCurrency = hasCurrencyPrice(directText || token.raw);
+
+  if (!hasCurrency && !selectorConfig?.allowPlainNumber) {
+    return null;
+  }
+
+  let score = selectorConfig?.score || 30;
+
+  if (hasCurrency) score += 40;
+  if (/(product__info|product-info|product-meta|product-form|product-single|main-product|buy-buttons|add-to-cart|cart\/add)/i.test(context.classSource)) {
+    score += 25;
+  }
+  if (/(sale|selling|current|final-price|price__sale)/i.test(context.classSource)) {
+    score += 10;
+  }
+  if (isMrp) {
+    score -= 60;
+  }
+  if (/(offer|coupon|promo|banner|discount)/i.test(context.classSource)) {
+    score -= 45;
+  }
+
+  return {
+    value: token.value,
+    score,
+    source: selectorConfig?.source || 'body currency fallback',
+    text: directText || token.raw,
+    isMrp
+  };
+}
+
+function extractVisiblePriceResult($) {
+  const candidates = [];
+
+  PRICE_CANDIDATE_SELECTORS.forEach(selectorConfig => {
+    $(selectorConfig.selector).each((_, element) => {
+      const node = $(element);
+      const rawText = normalizeText(
+        node.attr('content') ||
+          node.attr('data-product-price') ||
+          node.attr('data-price') ||
+          node.text()
+      );
+      const tokens = extractCurrencyPriceTokens(rawText);
+      const priceTokens =
+        tokens.length > 0
+          ? tokens
+          : selectorConfig.allowPlainNumber
+            ? [{ raw: rawText, value: normalizePrice(rawText), index: 0 }]
+            : [];
+
+      priceTokens
+        .filter(token => token.value)
+        .forEach(token => {
+          const candidate = scorePriceCandidate({
+            $,
+            element,
+            selectorConfig,
+            token,
+            candidateText: rawText
+          });
+
+          if (candidate) {
+            candidates.push(candidate);
+          }
+        });
+    });
+  });
+
+  if (candidates.length === 0) {
+    const bodyText = $('body').text().replace(/\s+/g, ' ').trim();
+    extractCurrencyPriceTokens(bodyText).forEach(token => {
+      const start = Math.max(0, token.index - 60);
+      const end = Math.min(bodyText.length, token.index + token.raw.length + 60);
+      const nearbyText = bodyText.slice(start, end);
+      const candidate = scorePriceCandidate({
+        $,
+        element: null,
+        selectorConfig: {
+          source: 'body currency fallback',
+          score: 20,
+          tokenAwareOnly: true
+        },
+        token: {
+          ...token,
+          index: token.index - start
+        },
+        candidateText: nearbyText
+      });
+
+      if (candidate) {
+        candidates.push(candidate);
+      }
+    });
+  }
+
+  const primaryCandidates = candidates.filter(candidate => !candidate.isMrp);
+  const sorted = (primaryCandidates.length > 0 ? primaryCandidates : candidates)
+    .sort((left, right) => right.score - left.score);
+  const best = sorted[0];
+
+  return {
+    value: best?.value || '',
+    source: best
+      ? `${best.source}: ${best.text.slice(0, 120)}`
+      : 'not detected'
+  };
+}
+
+function extractVisiblePrice($) {
+  return extractVisiblePriceResult($).value;
+}
+
+function collectPriceValuesFromObject(value, found = []) {
+  if (!value) {
+    return found;
+  }
+
+  if (Array.isArray(value)) {
+    value.forEach(item => collectPriceValuesFromObject(item, found));
+    return found;
+  }
+
+  if (typeof value !== 'object') {
+    return found;
+  }
+
+  Object.entries(value).forEach(([key, child]) => {
+    if (/^(price|price_min|price_max|compare_at_price|compare_at_price_min|compare_at_price_max)$/i.test(key)) {
+      if (typeof child === 'number' || /^\d+$/.test(String(child || ''))) {
+        found.push(String(child));
+      }
+    }
+
+    collectPriceValuesFromObject(child, found);
+  });
+
+  return found;
+}
+
+function selectRawShopifyPrice(candidates = [], visiblePrice = '') {
+  const normalizedVisiblePrice = Number(normalizePrice(visiblePrice));
+  const uniqueCandidates = Array.from(new Set(candidates.filter(Boolean)));
+
+  if (uniqueCandidates.length === 0) {
+    return '';
+  }
+
+  if (Number.isFinite(normalizedVisiblePrice)) {
+    const minorUnitMatch = uniqueCandidates.find(candidate => {
+      const raw = Number(candidate);
+      return Number.isFinite(raw) && Math.abs(raw / 100 - normalizedVisiblePrice) < 0.01;
+    });
+
+    if (minorUnitMatch) {
+      return minorUnitMatch;
+    }
+
+    const majorUnitMatch = uniqueCandidates.find(candidate => {
+      const raw = Number(candidate);
+      return Number.isFinite(raw) && Math.abs(raw - normalizedVisiblePrice) < 0.01;
+    });
+
+    if (majorUnitMatch) {
+      return majorUnitMatch;
     }
   }
 
-  const bodyText = $('body').text().replace(/\s+/g, ' ').trim();
-  const fallbackMatch = bodyText.match(/(?:Rs\.?|INR)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/i);
-  return fallbackMatch ? normalizePrice(fallbackMatch[1]) : '';
+  return uniqueCandidates[0];
+}
+
+function extractRawShopifyPrice($, html = '', visiblePrice = '') {
+  if (!/Shopify|cdn\.shopify\.com|\/cart\/add|ProductJson|data-product-json/i.test(html)) {
+    return '';
+  }
+
+  const candidates = [];
+
+  $('script').each((_, element) => {
+    const type = String($(element).attr('type') || '').toLowerCase();
+    if (type.includes('ld+json')) {
+      return;
+    }
+
+    const content = $(element).html() || '';
+
+    if (/json/i.test(type)) {
+      try {
+        collectPriceValuesFromObject(JSON.parse(content), candidates);
+      } catch (error) {
+        // Fall through to regex extraction for app/theme payloads that are JS-like.
+      }
+    }
+
+    const pricePattern = /["']?(price|price_min|price_max|compare_at_price|compare_at_price_min|compare_at_price_max)["']?\s*:\s*["']?(\d{3,})(?!\.)["']?/gi;
+    let match;
+    while ((match = pricePattern.exec(content)) !== null) {
+      candidates.push(match[2]);
+    }
+  });
+
+  $('[data-product-json], [data-variant-json], [data-shopify-product]')
+    .each((_, element) => {
+      Object.values(element.attribs || {}).forEach(value => {
+        const match = String(value || '').match(/\b\d{3,}\b/);
+        if (match) {
+          candidates.push(match[0]);
+        }
+      });
+    });
+
+  return selectRawShopifyPrice(candidates, visiblePrice);
 }
 
 function extractVisibleAvailability($) {
@@ -506,7 +815,9 @@ function buildStructuredDataResult(
   breadcrumbTrail = { present: false, links: [] },
   microdataItems = [],
   visiblePrice = '',
-  visibleAvailability = ''
+  visiblePriceSource = '',
+  visibleAvailability = '',
+  rawShopifyPrice = ''
 ) {
   const normalizedBreadcrumbTrail =
     typeof breadcrumbTrail === 'boolean'
@@ -558,7 +869,8 @@ function buildStructuredDataResult(
     breadcrumbLinks: normalizedBreadcrumbTrail.links || [],
     jsonLdErrorCount: parseResult.errors.length,
     visiblePrice,
-    visibleAvailability
+    visibleAvailability,
+    rawShopifyPrice
   });
 
   (schemaAudit.consistencyWarnings || []).forEach(warning => {
@@ -570,7 +882,11 @@ function buildStructuredDataResult(
       details: {
         schemaPrice: schemaAudit.schemaPrice || '',
         visiblePrice: schemaAudit.visiblePrice || '',
+        visiblePriceSource,
+        rawShopifyPrice: schemaAudit.rawShopifyPrice || '',
         priceMatchStatus: schemaAudit.priceMatchStatus || '',
+        priceUnitStatus: schemaAudit.priceUnitStatus || '',
+        priceDebugNote: schemaAudit.priceDebugNote || '',
         schemaAvailability: schemaAudit.schemaAvailability || '',
         visibleAvailability: schemaAudit.visibleAvailability || '',
         availabilityMatchStatus: schemaAudit.availabilityMatchStatus || ''
@@ -616,12 +932,17 @@ function buildStructuredDataResult(
     schemaRecommendations: schemaAudit.schemaRecommendations || [],
     schemaScoreBreakdown: schemaAudit.schemaScoreBreakdown || {},
     schemaPrice: schemaAudit.schemaPrice || '',
+    visiblePriceSource,
+    rawShopifyPrice: schemaAudit.rawShopifyPrice || '',
     priceMatchStatus: schemaAudit.priceMatchStatus || '',
+    priceUnitStatus: schemaAudit.priceUnitStatus || '',
+    priceDebugNote: schemaAudit.priceDebugNote || '',
     schemaAvailability: schemaAudit.schemaAvailability || '',
     visibleAvailability: schemaAudit.visibleAvailability || '',
     availabilityMatchStatus: schemaAudit.availabilityMatchStatus || '',
     consistencyWarnings: schemaAudit.consistencyWarnings || [],
     visiblePrice: normalizePrice(visiblePrice) || '',
+    visiblePriceSource,
     totalDetectedItems:
       parseResult.schemaObjectCount + microdataItems.length > 0
         ? parseResult.schemaObjectCount + microdataItems.length
@@ -640,7 +961,9 @@ function extractStructuredDataFromHtml(html, pageType, pageUrl = '') {
   const parseResult = parseJsonLdScripts(scripts);
   const breadcrumbTrail = extractBreadcrumbTrailFromCheerio($, pageUrl);
   const microdataItems = extractMicrodataItems($);
-  const visiblePrice = extractVisiblePrice($);
+  const visiblePriceResult = extractVisiblePriceResult($);
+  const visiblePrice = visiblePriceResult.value;
+  const rawShopifyPrice = extractRawShopifyPrice($, html, visiblePrice);
   const visibleAvailability = extractVisibleAvailability($);
 
   return buildStructuredDataResult(
@@ -651,7 +974,9 @@ function extractStructuredDataFromHtml(html, pageType, pageUrl = '') {
     breadcrumbTrail,
     microdataItems,
     visiblePrice,
-    visibleAvailability
+    visiblePriceResult.source,
+    visibleAvailability,
+    rawShopifyPrice
   );
 }
 
@@ -737,6 +1062,12 @@ async function extractStructuredDataWithPuppeteer(url, pageType) {
     const rendered$ = cheerio.load(renderedHtml);
     const renderedMicrodataItems = extractMicrodataItems(rendered$);
     const breadcrumbTrail = extractBreadcrumbTrailFromCheerio(rendered$, url);
+    const visiblePriceResult = extractVisiblePriceResult(rendered$);
+    const rawShopifyPrice = extractRawShopifyPrice(
+      rendered$,
+      renderedHtml,
+      visiblePriceResult.value || renderedData.visiblePrice
+    );
     const visibleAvailability = extractVisibleAvailability(rendered$);
 
     return buildStructuredDataResult(
@@ -746,8 +1077,10 @@ async function extractStructuredDataWithPuppeteer(url, pageType) {
       url,
       breadcrumbTrail,
       renderedMicrodataItems,
-      normalizePrice(renderedData.visiblePrice) || '',
-      visibleAvailability
+      visiblePriceResult.value || normalizePrice(renderedData.visiblePrice) || '',
+      visiblePriceResult.source,
+      visibleAvailability,
+      rawShopifyPrice
     );
   } catch (error) {
     return {
