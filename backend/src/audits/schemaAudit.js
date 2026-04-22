@@ -1,3 +1,8 @@
+const {
+  getMissingSchemaGroups,
+  listExpectedSchemaTypes
+} = require('../utils/schemaRules');
+
 function normalizeSchemaType(type) {
   return String(type || '')
     .trim()
@@ -105,6 +110,116 @@ function collectAllSchemaTypes(value, detected = new Set(), seen = new WeakSet()
   return detected;
 }
 
+function collectJsonLdEntities(value, entities = [], seen = new WeakSet()) {
+  if (!value) {
+    return entities;
+  }
+
+  if (Array.isArray(value)) {
+    value.forEach(item => collectJsonLdEntities(item, entities, seen));
+    return entities;
+  }
+
+  if (typeof value !== 'object') {
+    return entities;
+  }
+
+  if (seen.has(value)) {
+    return entities;
+  }
+
+  seen.add(value);
+
+  if (value['@id']) {
+    entities.push(value);
+  }
+
+  if (Array.isArray(value['@graph'])) {
+    value['@graph'].forEach(item => collectJsonLdEntities(item, entities, seen));
+  }
+
+  Object.entries(value).forEach(([key, child]) => {
+    if (key === '@context' || key === '@graph') {
+      return;
+    }
+
+    collectJsonLdEntities(child, entities, seen);
+  });
+
+  return entities;
+}
+
+function createJsonLdEntityIndex(jsonLdDocuments = []) {
+  const index = new Map();
+
+  jsonLdDocuments
+    .flatMap(document => collectJsonLdEntities(document))
+    .forEach(entity => {
+      const id = normalizeEntityId(entity['@id']);
+      const existing = index.get(id);
+      if (
+        id &&
+        (!existing ||
+          (isReferenceOnlyObject(existing) && !isReferenceOnlyObject(entity)))
+      ) {
+        index.set(id, entity);
+      }
+    });
+
+  return index;
+}
+
+function isReferenceOnlyObject(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+
+  const keys = Object.keys(value);
+  return keys.length === 1 && keys[0] === '@id';
+}
+
+function resolveJsonLdReference(value, graphIndex, seen = new Set()) {
+  if (!graphIndex || graphIndex.size === 0 || !value) {
+    return value;
+  }
+
+  const id =
+    typeof value === 'string'
+      ? normalizeEntityId(value)
+      : typeof value === 'object'
+        ? normalizeEntityId(value['@id'])
+        : '';
+
+  if (!id || seen.has(id) || !graphIndex.has(id)) {
+    return value;
+  }
+
+  seen.add(id);
+  const referenced = graphIndex.get(id);
+
+  if (isReferenceOnlyObject(value) || typeof value === 'string') {
+    return referenced;
+  }
+
+  return {
+    ...referenced,
+    ...value
+  };
+}
+
+function resolveJsonLdValue(value, graphIndex, seen = new Set()) {
+  if (Array.isArray(value)) {
+    return value.map(item => resolveJsonLdValue(item, graphIndex, seen));
+  }
+
+  if (!value || typeof value !== 'object') {
+    return resolveJsonLdReference(value, graphIndex, seen);
+  }
+
+  const resolved = resolveJsonLdReference(value, graphIndex, seen);
+  return resolved;
+}
+
 function normalizeMicrodataType(itemType) {
   return normalizeSchemaType(String(itemType || '').split(/\s+/)[0]);
 }
@@ -125,12 +240,63 @@ function readMicrodataValue($, element) {
     .trim();
 }
 
+function normalizePropertyValues(value) {
+  if (value === undefined || value === null) {
+    return [];
+  }
+
+  return Array.isArray(value) ? value.filter(Boolean) : [value].filter(Boolean);
+}
+
+function readCandidateField(candidate, key) {
+  if (!candidate) {
+    return '';
+  }
+
+  if (candidate.source === 'microdata') {
+    return normalizePropertyValues(candidate.properties?.[key])[0] || '';
+  }
+
+  return readJsonLdField(candidate.entity || {}, key, candidate.graphIndex || null) || '';
+}
+
+function readCandidateFields(candidate, keys = []) {
+  return keys.flatMap(key => normalizePropertyValues(readCandidateField(candidate, key)));
+}
+
+function collectMicrodataPropertyValues(item, keys = [], found = []) {
+  if (!item || typeof item !== 'object') {
+    return found;
+  }
+
+  const properties = item.properties || {};
+  keys.forEach(key => {
+    normalizePropertyValues(properties[key]).forEach(value => {
+      if (value && typeof value === 'object' && value.properties) {
+        collectMicrodataPropertyValues(value, keys, found);
+      } else if (value !== undefined && value !== null) {
+        found.push(value);
+      }
+    });
+  });
+
+  Object.values(properties).flat().forEach(value => {
+    if (value && typeof value === 'object' && value.properties) {
+      collectMicrodataPropertyValues(value, keys, found);
+    }
+  });
+
+  return found;
+}
+
 function extractMicrodataProperties($, root) {
   const properties = {};
 
-  $(root).find('[itemprop]').each((_, element) => {
+  $(root).children().find('[itemprop]').add($(root).children('[itemprop]')).each((_, element) => {
     const ownerScope = $(element).closest('[itemscope]').get(0);
-    if (ownerScope && ownerScope !== root) {
+    const isNestedScope = element !== root && $(element).is('[itemscope]');
+
+    if (ownerScope && ownerScope !== root && !isNestedScope) {
       return;
     }
 
@@ -139,7 +305,9 @@ function extractMicrodataProperties($, root) {
       return;
     }
 
-    const value = readMicrodataValue($, element);
+    const value = isNestedScope
+      ? extractMicrodataItem($, element)
+      : readMicrodataValue($, element);
     if (!value) {
       return;
     }
@@ -154,27 +322,45 @@ function extractMicrodataProperties($, root) {
   return properties;
 }
 
+function extractMicrodataItem($, element) {
+  const itemType = normalizeMicrodataType($(element).attr('itemtype'));
+  if (!itemType) {
+    return null;
+  }
+
+  const properties = extractMicrodataProperties($, element);
+  const nestedTypes = Object.values(properties)
+    .flat()
+    .filter(value => value && typeof value === 'object' && value.types)
+    .flatMap(value => value.types || []);
+
+  return {
+    source: 'microdata',
+    types: Array.from(new Set([itemType, ...nestedTypes])),
+    primaryType: itemType,
+    properties
+  };
+}
+
 function extractMicrodataItems($) {
   const items = [];
 
   $('[itemscope][itemtype]').each((_, element) => {
-    const itemType = normalizeMicrodataType($(element).attr('itemtype'));
-    if (!itemType) {
+    if ($(element).parents('[itemscope]').length > 0) {
       return;
     }
 
-    items.push({
-      source: 'microdata',
-      types: [itemType],
-      properties: extractMicrodataProperties($, element)
-    });
+    const item = extractMicrodataItem($, element);
+    if (item) {
+      items.push(item);
+    }
   });
 
   return items;
 }
 
-function readJsonLdField(entity, key) {
-  const value = entity?.[key];
+function readJsonLdField(entity, key, graphIndex = null) {
+  const value = resolveJsonLdValue(entity?.[key], graphIndex);
 
   if (Array.isArray(value)) {
     return value.find(Boolean);
@@ -183,14 +369,22 @@ function readJsonLdField(entity, key) {
   return value;
 }
 
-function readOfferField(entity, key) {
-  const offers = readJsonLdField(entity, 'offers');
+function getResolvedOfferEntities(entity, graphIndex = null) {
+  const offers = readJsonLdField(entity, 'offers', graphIndex);
 
   if (Array.isArray(offers)) {
-    return offers.map(offer => offer?.[key]).find(Boolean);
+    return offers
+      .map(offer => resolveJsonLdValue(offer, graphIndex))
+      .filter(Boolean);
   }
 
-  return offers?.[key];
+  return offers ? [resolveJsonLdValue(offers, graphIndex)] : [];
+}
+
+function readOfferField(entity, key, graphIndex = null) {
+  return getResolvedOfferEntities(entity, graphIndex)
+    .map(offer => readJsonLdField(offer, key, graphIndex))
+    .find(Boolean);
 }
 
 function hasImageValue(value) {
@@ -219,22 +413,26 @@ function hasProductEligibilityFields(candidate) {
     return {
       name: Boolean(props.name?.[0]),
       image: Boolean(props.image?.[0]),
-      price: Boolean(props.price?.[0]),
-      availability: Boolean(props.availability?.[0])
+      price: collectMicrodataPropertyValues(candidate, ['price', 'lowPrice']).length > 0,
+      availability: collectMicrodataPropertyValues(candidate, ['availability']).length > 0
     };
   }
 
   const entity = candidate.entity || {};
+  const graphIndex = candidate.graphIndex || null;
 
   return {
-    name: Boolean(readJsonLdField(entity, 'name')),
-    image: hasImageValue(readJsonLdField(entity, 'image')),
+    name: Boolean(readJsonLdField(entity, 'name', graphIndex)),
+    image: hasImageValue(readJsonLdField(entity, 'image', graphIndex)),
     price: Boolean(
-      readJsonLdField(entity, 'price') || readOfferField(entity, 'price')
+      readJsonLdField(entity, 'price', graphIndex) ||
+        readOfferField(entity, 'price', graphIndex) ||
+        getVariantCandidates(candidate).some(variant => getSchemaPrice(variant))
     ),
     availability: Boolean(
-      readJsonLdField(entity, 'availability') ||
-        readOfferField(entity, 'availability')
+      readJsonLdField(entity, 'availability', graphIndex) ||
+        readOfferField(entity, 'availability', graphIndex) ||
+        getVariantCandidates(candidate).some(variant => getSchemaAvailability(variant))
     )
   };
 }
@@ -254,11 +452,246 @@ function getOptionalProductFieldMap(candidate) {
   }
 
   const entity = candidate.entity || {};
+  const graphIndex = candidate.graphIndex || null;
 
   return {
-    gtin13: Boolean(readJsonLdField(entity, 'gtin13')),
-    color: Boolean(readJsonLdField(entity, 'color')),
-    material: Boolean(readJsonLdField(entity, 'material'))
+    gtin13: Boolean(readJsonLdField(entity, 'gtin13', graphIndex)),
+    color: Boolean(readJsonLdField(entity, 'color', graphIndex)),
+    material: Boolean(readJsonLdField(entity, 'material', graphIndex))
+  };
+}
+
+function stringifySchemaValue(value) {
+  if (value === undefined || value === null) {
+    return '';
+  }
+
+  if (typeof value === 'string' || typeof value === 'number') {
+    return String(value).trim();
+  }
+
+  if (Array.isArray(value)) {
+    return value.map(stringifySchemaValue).find(Boolean) || '';
+  }
+
+  if (typeof value === 'object') {
+    return stringifySchemaValue(
+      value.name ||
+        value.url ||
+        value.contentUrl ||
+        value['@id'] ||
+        value.sku ||
+        value.value
+    );
+  }
+
+  return '';
+}
+
+function getCandidateFieldValues(candidate, keys = []) {
+  if (!candidate) {
+    return [];
+  }
+
+  if (candidate.source === 'microdata') {
+    return uniqueValues(
+      keys
+        .flatMap(key => collectMicrodataPropertyValues(candidate, [key]))
+        .map(stringifySchemaValue)
+    );
+  }
+
+  const entity = candidate.entity || {};
+  const graphIndex = candidate.graphIndex || null;
+  return uniqueValues(
+    keys
+      .flatMap(key => normalizePropertyValues(readJsonLdField(entity, key, graphIndex)))
+      .map(value => stringifySchemaValue(resolveJsonLdValue(value, graphIndex)))
+  );
+}
+
+function getProductImageValues(candidate) {
+  if (candidate?.source === 'microdata') {
+    return getCandidateFieldValues(candidate, ['image']);
+  }
+
+  const value = readJsonLdField(
+    candidate?.entity || {},
+    'image',
+    candidate?.graphIndex || null
+  );
+  return uniqueValues(normalizePropertyValues(value).map(stringifySchemaValue));
+}
+
+function isValidAbsoluteUrl(value) {
+  try {
+    const parsed = new URL(String(value || ''));
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch (error) {
+    return false;
+  }
+}
+
+function validateImageUrl(value) {
+  const text = String(value || '').trim();
+  if (!text) {
+    return { valid: false, reason: 'missing' };
+  }
+
+  if (!isValidAbsoluteUrl(text)) {
+    return { valid: false, reason: 'not_absolute_url' };
+  }
+
+  if (!/\.(avif|gif|jpe?g|png|webp)(?:[?#].*)?$/i.test(text)) {
+    return { valid: true, reason: 'url_without_image_extension' };
+  }
+
+  return { valid: true, reason: '' };
+}
+
+function buildProductFieldValidation(pageType, productCandidates = []) {
+  if (pageType !== 'product') {
+    return {
+      status: 'not_applicable',
+      required: [],
+      recommended: [],
+      optional: [],
+      warnings: []
+    };
+  }
+
+  const primaryCandidate =
+    productCandidates.find(candidate => {
+      const fields = hasProductEligibilityFields(candidate);
+      return fields.name && fields.image;
+    }) ||
+    getPrimaryProductCandidate(productCandidates);
+  if (!primaryCandidate) {
+    return {
+      status: 'error',
+      required: [
+        { field: 'Product/ProductGroup', status: 'missing', level: 'required' }
+      ],
+      recommended: [],
+      optional: [],
+      warnings: ['Product/ProductGroup schema is missing']
+    };
+  }
+
+  const requiredChecks = [
+    {
+      field: 'name',
+      status: getCandidateFieldValues(primaryCandidate, ['name']).length > 0 ? 'pass' : 'missing',
+      level: 'required'
+    },
+    {
+      field: 'image',
+      status: getProductImageValues(primaryCandidate).length > 0 ? 'pass' : 'missing',
+      level: 'required'
+    },
+    {
+      field: 'offers.price',
+      status: getAllSchemaPrices(productCandidates).length > 0 ? 'pass' : 'missing',
+      level: 'required'
+    },
+    {
+      field: 'offers.availability',
+      status: getAllSchemaAvailabilities(productCandidates).length > 0 ? 'pass' : 'missing',
+      level: 'required'
+    }
+  ];
+
+  const imageValues = getProductImageValues(primaryCandidate);
+  const imageIssues = imageValues
+    .map(value => ({ value, ...validateImageUrl(value) }))
+    .filter(item => !item.valid);
+
+  const recommendedChecks = [
+    {
+      field: 'sku',
+      status: getCandidateFieldValues(primaryCandidate, ['sku']).length > 0 ? 'pass' : 'recommended',
+      level: 'recommended'
+    },
+    {
+      field: 'brand',
+      status: getCandidateFieldValues(primaryCandidate, ['brand', 'manufacturer']).length > 0 ? 'pass' : 'recommended',
+      level: 'recommended'
+    },
+    {
+      field: 'offers.priceCurrency',
+      status: productCandidates.some(candidate =>
+        getOfferValues(candidate.entity || {}, 'priceCurrency', candidate.graphIndex || null).length > 0 ||
+          collectMicrodataPropertyValues(candidate, ['priceCurrency']).length > 0
+      )
+        ? 'pass'
+        : 'recommended',
+      level: 'recommended'
+    },
+    {
+      field: 'url',
+      status: getCandidateFieldValues(primaryCandidate, ['url']).some(isValidAbsoluteUrl)
+        ? 'pass'
+        : 'recommended',
+      level: 'recommended'
+    },
+    {
+      field: 'image.url',
+      status: imageIssues.length === 0 ? 'pass' : 'warning',
+      level: 'recommended',
+      warnings: imageIssues.map(item => `${item.value}: ${item.reason}`)
+    }
+  ];
+
+  const identifierFields = ['gtin', 'gtin8', 'gtin12', 'gtin13', 'gtin14', 'mpn'];
+  const optionalChecks = identifierFields.map(field => {
+    const values = getCandidateFieldValues(primaryCandidate, [field]);
+    const invalidValues = values.filter(value => {
+      if (field.startsWith('gtin')) {
+        return !/^\d{8,14}$/.test(String(value).replace(/\D/g, ''));
+      }
+      return field === 'mpn' && String(value).trim().length < 2;
+    });
+
+    return {
+      field,
+      status:
+        values.length === 0
+          ? 'not_present'
+          : invalidValues.length > 0
+            ? 'warning'
+            : 'pass',
+      level: 'optional',
+      warnings: invalidValues
+    };
+  });
+
+  const warnings = [
+    ...requiredChecks
+      .filter(item => item.status === 'missing')
+      .map(item => `${item.field} is missing`),
+    ...recommendedChecks
+      .filter(item => item.status === 'recommended')
+      .map(item => `${item.field} is recommended`),
+    ...recommendedChecks
+      .filter(item => item.status === 'warning')
+      .map(item => `${item.field} should be checked`),
+    ...optionalChecks
+      .filter(item => item.status === 'warning')
+      .map(item => `${item.field} has an invalid-looking value`)
+  ];
+
+  return {
+    status:
+      requiredChecks.some(item => item.status === 'missing')
+        ? 'error'
+        : recommendedChecks.some(item => item.status !== 'pass') ||
+            optionalChecks.some(item => item.status === 'warning')
+          ? 'warning'
+          : 'pass',
+    required: requiredChecks,
+    recommended: recommendedChecks,
+    optional: optionalChecks,
+    warnings
   };
 }
 
@@ -361,14 +794,87 @@ function uniqueValues(values = []) {
   return Array.from(new Set(values.filter(Boolean)));
 }
 
-function getOfferValues(entity, key) {
-  const offers = entity?.offers;
+function getOfferValues(entity, key, graphIndex = null) {
+  return getResolvedOfferEntities(entity, graphIndex)
+    .flatMap(offer => {
+      const value = readJsonLdField(offer, key, graphIndex);
+      return Array.isArray(value) ? value : [value];
+    })
+    .filter(Boolean);
+}
 
-  if (Array.isArray(offers)) {
-    return offers.map(offer => offer?.[key]).filter(Boolean);
+function getVariantCandidates(candidate) {
+  if (!candidate || candidate.source === 'microdata') {
+    return [];
   }
 
-  return offers?.[key] ? [offers[key]] : [];
+  const entity = candidate.entity || {};
+  const graphIndex = candidate.graphIndex || null;
+  const variants = readJsonLdField(entity, 'hasVariant', graphIndex);
+  const values = Array.isArray(variants) ? variants : variants ? [variants] : [];
+
+  return values
+    .map(variant => resolveJsonLdValue(variant, graphIndex))
+    .filter(variant => variant && typeof variant === 'object')
+    .map(variant => ({
+      source: 'json-ld',
+      types: getNormalizedTypeList(variant),
+      entity: variant,
+      graphIndex,
+      parentTypes: candidate.types || []
+    }));
+}
+
+function getProductAndVariantCandidates(productCandidates = []) {
+  return [
+    ...productCandidates,
+    ...productCandidates.flatMap(getVariantCandidates)
+  ];
+}
+
+function normalizeVariantId(value) {
+  const match = String(value || '').match(/\d{5,}/);
+  return match ? match[0] : String(value || '').trim();
+}
+
+function getCandidateIdentityValues(candidate) {
+  if (!candidate || candidate.source === 'microdata') {
+    const props = candidate?.properties || {};
+    return uniqueValues([
+      props.sku?.[0],
+      props.productID?.[0],
+      props.url?.[0],
+      props.name?.[0]
+    ]);
+  }
+
+  const entity = candidate.entity || {};
+  const graphIndex = candidate.graphIndex || null;
+  return uniqueValues([
+    entity['@id'],
+    readJsonLdField(entity, 'sku', graphIndex),
+    readJsonLdField(entity, 'productID', graphIndex),
+    readJsonLdField(entity, 'variantId', graphIndex),
+    readJsonLdField(entity, 'url', graphIndex),
+    readJsonLdField(entity, 'name', graphIndex)
+  ]);
+}
+
+function getSelectedVariantCandidate(productCandidates = [], selectedVariantId = '') {
+  const normalizedSelected = normalizeVariantId(selectedVariantId);
+  if (!normalizedSelected) {
+    return null;
+  }
+
+  return getProductAndVariantCandidates(productCandidates).find(candidate =>
+    getCandidateIdentityValues(candidate).some(value => {
+      const normalizedValue = normalizeVariantId(value);
+      return (
+        normalizedValue === normalizedSelected ||
+        String(value || '').includes(normalizedSelected)
+      );
+    })
+  ) || null;
 }
 
 function getSchemaPrice(candidate) {
@@ -377,12 +883,17 @@ function getSchemaPrice(candidate) {
   }
 
   if (candidate.source === 'microdata') {
-    return normalizePrice(candidate.properties?.price?.[0]);
+    return normalizePrice(
+      collectMicrodataPropertyValues(candidate, ['price', 'lowPrice'])[0]
+    );
   }
 
   const entity = candidate.entity || {};
+  const graphIndex = candidate.graphIndex || null;
   return normalizePrice(
-    readJsonLdField(entity, 'price') || readOfferField(entity, 'price')
+    readJsonLdField(entity, 'price', graphIndex) ||
+      readOfferField(entity, 'price', graphIndex) ||
+      readOfferField(entity, 'lowPrice', graphIndex)
   );
 }
 
@@ -392,15 +903,20 @@ function getSchemaPrices(candidate) {
   }
 
   if (candidate.source === 'microdata') {
-    return uniqueValues((candidate.properties?.price || []).map(normalizePrice));
+    return uniqueValues(
+      collectMicrodataPropertyValues(candidate, ['price', 'lowPrice', 'highPrice'])
+        .map(normalizePrice)
+    );
   }
 
   const entity = candidate.entity || {};
+  const graphIndex = candidate.graphIndex || null;
   return uniqueValues([
-    normalizePrice(readJsonLdField(entity, 'price')),
-    ...getOfferValues(entity, 'price').map(normalizePrice),
-    ...getOfferValues(entity, 'lowPrice').map(normalizePrice),
-    ...getOfferValues(entity, 'highPrice').map(normalizePrice)
+    normalizePrice(readJsonLdField(entity, 'price', graphIndex)),
+    ...getOfferValues(entity, 'price', graphIndex).map(normalizePrice),
+    ...getOfferValues(entity, 'lowPrice', graphIndex).map(normalizePrice),
+    ...getOfferValues(entity, 'highPrice', graphIndex).map(normalizePrice),
+    ...getVariantCandidates(candidate).flatMap(getSchemaPrices)
   ]);
 }
 
@@ -410,13 +926,16 @@ function getSchemaAvailability(candidate) {
   }
 
   if (candidate.source === 'microdata') {
-    return normalizeAvailability(candidate.properties?.availability?.[0]);
+    return normalizeAvailability(
+      collectMicrodataPropertyValues(candidate, ['availability'])[0]
+    );
   }
 
   const entity = candidate.entity || {};
+  const graphIndex = candidate.graphIndex || null;
   return normalizeAvailability(
-    readJsonLdField(entity, 'availability') ||
-      readOfferField(entity, 'availability')
+    readJsonLdField(entity, 'availability', graphIndex) ||
+      readOfferField(entity, 'availability', graphIndex)
   );
 }
 
@@ -427,23 +946,26 @@ function getSchemaAvailabilities(candidate) {
 
   if (candidate.source === 'microdata') {
     return uniqueValues(
-      (candidate.properties?.availability || []).map(normalizeAvailability)
+      collectMicrodataPropertyValues(candidate, ['availability'])
+        .map(normalizeAvailability)
     );
   }
 
   const entity = candidate.entity || {};
+  const graphIndex = candidate.graphIndex || null;
   return uniqueValues([
-    normalizeAvailability(readJsonLdField(entity, 'availability')),
-    ...getOfferValues(entity, 'availability').map(normalizeAvailability)
+    normalizeAvailability(readJsonLdField(entity, 'availability', graphIndex)),
+    ...getOfferValues(entity, 'availability', graphIndex).map(normalizeAvailability),
+    ...getVariantCandidates(candidate).flatMap(getSchemaAvailabilities)
   ]);
 }
 
 function getAllSchemaPrices(productCandidates = []) {
-  return uniqueValues(productCandidates.flatMap(getSchemaPrices));
+  return uniqueValues(getProductAndVariantCandidates(productCandidates).flatMap(getSchemaPrices));
 }
 
 function getAllSchemaAvailabilities(productCandidates = []) {
-  return uniqueValues(productCandidates.flatMap(getSchemaAvailabilities));
+  return uniqueValues(getProductAndVariantCandidates(productCandidates).flatMap(getSchemaAvailabilities));
 }
 
 function normalizeEntityId(value) {
@@ -500,88 +1022,377 @@ function hasSchemaTypeInMicrodata(microdataItems = [], schemaType) {
   );
 }
 
-const PAGE_SCHEMA_RULES = {
-  homepage: {
-    required: [
-      { label: 'Organization', anyOf: ['Organization'] },
-      { label: 'WebSite', anyOf: ['WebSite'] }
-    ],
-    recommended: []
-  },
-  collection: {
-    required: [
-      { label: 'CollectionPage or WebPage', anyOf: ['CollectionPage', 'WebPage'] }
-    ],
-    recommended: [
-      { label: 'BreadcrumbList', anyOf: ['BreadcrumbList'] },
-      { label: 'ItemList', anyOf: ['ItemList'], optional: true }
-    ]
-  },
-  product: {
-    required: [
-      { label: 'Product or ProductGroup', anyOf: ['Product', 'ProductGroup'] },
-      { label: 'Offer or AggregateOffer', anyOf: ['Offer', 'AggregateOffer'] }
-    ],
-    recommended: [{ label: 'BreadcrumbList', anyOf: ['BreadcrumbList'] }]
-  },
-  blog: {
-    required: [
-      { label: 'Article or BlogPosting', anyOf: ['Article', 'BlogPosting'] }
-    ],
-    recommended: [{ label: 'BreadcrumbList', anyOf: ['BreadcrumbList'] }]
-  },
-  page: {
-    required: [{ label: 'WebPage', anyOf: ['WebPage'] }],
-    recommended: []
-  },
-  search: {
-    required: [{ label: 'SearchResultsPage or WebPage', anyOf: ['SearchResultsPage', 'WebPage'] }],
-    recommended: []
-  },
-  webpage: {
-    required: [{ label: 'WebPage', anyOf: ['WebPage'] }],
-    recommended: []
+function normalizeComparableText(value) {
+  return String(value || '')
+    .replace(/&amp;/gi, '&')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function normalizeComparableUrl(value, pageUrl = '') {
+  const raw = String(value || '').trim();
+  if (!raw) {
+    return '';
   }
-};
 
-function getSchemaRules(pageType) {
-  return PAGE_SCHEMA_RULES[pageType] || PAGE_SCHEMA_RULES.webpage;
+  try {
+    const parsed = new URL(raw, pageUrl || undefined);
+    parsed.hash = '';
+    parsed.search = '';
+    return parsed.href.replace(/\/+$/, '');
+  } catch (error) {
+    return raw.replace(/\/+$/, '').toLowerCase();
+  }
 }
 
-function hasAnySchemaType(detectedTypes, expectedTypes) {
-  const typeSet = new Set(detectedTypes || []);
-  return expectedTypes.some(type => typeSet.has(type));
+function getBreadcrumbItemUrl(item, pageUrl = '') {
+  const value = item?.item || item?.url || item?.href || '';
+  if (typeof value === 'string') {
+    return normalizeComparableUrl(value, pageUrl);
+  }
+
+  return normalizeComparableUrl(value?.['@id'] || value?.url || value?.item || '', pageUrl);
 }
 
-function listExpectedSchemaTypes(pageType) {
-  const rules = getSchemaRules(pageType);
-  return [
-    ...rules.required.map(rule => rule.label),
-    ...rules.recommended.map(rule =>
-      rule.optional ? `${rule.label} (optional)` : rule.label
-    )
-  ];
-}
+function collectJsonLdBreadcrumbItems(jsonLdDocuments = [], pageUrl = '') {
+  const graphIndex = createJsonLdEntityIndex(jsonLdDocuments);
+  return jsonLdDocuments
+    .flatMap(document => collectEntitiesByTypes(document, new Set(['BreadcrumbList'])))
+    .flatMap(candidate => {
+      const entity = candidate.entity || {};
+      const itemList = resolveJsonLdValue(entity.itemListElement, graphIndex);
+      const items = Array.isArray(itemList) ? itemList : itemList ? [itemList] : [];
 
-function getMissingSchemaGroups(pageType, detectedTypes, breadcrumbUiPresent) {
-  const rules = getSchemaRules(pageType);
-  const missingRequired = rules.required
-    .filter(rule => !hasAnySchemaType(detectedTypes, rule.anyOf))
-    .map(rule => rule.label);
-  const missingRecommended = rules.recommended
-    .filter(rule => !hasAnySchemaType(detectedTypes, rule.anyOf))
-    .filter(rule => {
-      if (rule.label === 'BreadcrumbList') {
-        return pageType !== 'homepage' && breadcrumbUiPresent;
-      }
-
-      return true;
+      return items
+        .map((item, index) => resolveJsonLdValue(item, graphIndex))
+        .filter(item => item && typeof item === 'object')
+        .map((item, index) => ({
+          name: stringifySchemaValue(item.name || item.item?.name),
+          position: Number(item.position) || index + 1,
+          item: getBreadcrumbItemUrl(item, pageUrl)
+        }));
     })
-    .map(rule => rule.label);
+    .sort((left, right) => left.position - right.position);
+}
+
+function collectMicrodataBreadcrumbItems(microdataItems = [], pageUrl = '') {
+  return microdataItems
+    .filter(item => (item.types || []).includes('BreadcrumbList'))
+    .flatMap(item => normalizePropertyValues(item.properties?.itemListElement))
+    .filter(item => item && typeof item === 'object')
+    .map((item, index) => ({
+      name: stringifySchemaValue(
+        collectMicrodataPropertyValues(item, ['name'])[0] ||
+          collectMicrodataPropertyValues(item, ['item'])[0]
+      ),
+      position:
+        Number(collectMicrodataPropertyValues(item, ['position'])[0]) ||
+        index + 1,
+      item: normalizeComparableUrl(
+        stringifySchemaValue(collectMicrodataPropertyValues(item, ['item', 'url'])[0]),
+        pageUrl
+      )
+    }))
+    .sort((left, right) => left.position - right.position);
+}
+
+function buildBreadcrumbConsistency({
+  pageType,
+  pageUrl,
+  pageTitle = '',
+  jsonLdDocuments = [],
+  microdataItems = [],
+  breadcrumbUiPresent = false,
+  breadcrumbLinks = []
+}) {
+  const schemaItems = [
+    ...collectJsonLdBreadcrumbItems(jsonLdDocuments, pageUrl),
+    ...collectMicrodataBreadcrumbItems(microdataItems, pageUrl)
+  ];
+  const visibleItems = (breadcrumbLinks || [])
+    .filter(link => link?.name)
+    .map((link, index) => ({
+      name: String(link.name || '').trim(),
+      position: index + 1,
+      item: normalizeComparableUrl(link.item || link.href || '', pageUrl)
+    }));
+
+  if (!breadcrumbUiPresent && schemaItems.length === 0) {
+    return {
+      status: 'not_applicable',
+      warnings: [],
+      visibleItems,
+      schemaItems
+    };
+  }
+
+  if (breadcrumbUiPresent && schemaItems.length === 0) {
+    return {
+      status: 'missing_schema',
+      warnings: ['Visible breadcrumb UI is present but BreadcrumbList schema is missing.'],
+      visibleItems,
+      schemaItems
+    };
+  }
+
+  if (!breadcrumbUiPresent || visibleItems.length === 0) {
+    return {
+      status: 'schema_only',
+      warnings: [],
+      visibleItems,
+      schemaItems
+    };
+  }
+
+  const warnings = [];
+  const comparableLength = Math.min(visibleItems.length, schemaItems.length);
+
+  if (visibleItems.length !== schemaItems.length) {
+    warnings.push('Breadcrumb schema item count does not match visible breadcrumb UI.');
+  }
+
+  for (let index = 0; index < comparableLength; index += 1) {
+    const visible = visibleItems[index];
+    const schema = schemaItems[index];
+
+    if (Number(schema.position) !== index + 1) {
+      warnings.push(`Breadcrumb schema position ${schema.position || 'missing'} should be ${index + 1}.`);
+    }
+
+    if (
+      normalizeComparableText(visible.name) &&
+      normalizeComparableText(schema.name) &&
+      normalizeComparableText(visible.name) !== normalizeComparableText(schema.name)
+    ) {
+      warnings.push(`Breadcrumb name mismatch at position ${index + 1}: UI "${visible.name}" vs schema "${schema.name}".`);
+    }
+
+    if (visible.item && schema.item && visible.item !== schema.item) {
+      warnings.push(`Breadcrumb URL mismatch at position ${index + 1}.`);
+    }
+  }
+
+  const finalVisible = visibleItems[visibleItems.length - 1]?.name || '';
+  const finalSchema = schemaItems[schemaItems.length - 1]?.name || '';
+  const normalizedTitle = normalizeComparableText(pageTitle);
+  const normalizedFinal = normalizeComparableText(finalSchema || finalVisible);
+
+  if (
+    ['product', 'collection', 'blog'].includes(pageType) &&
+    normalizedTitle &&
+    normalizedFinal &&
+    !normalizedTitle.includes(normalizedFinal) &&
+    !normalizedFinal.includes(normalizedTitle)
+  ) {
+    warnings.push('Final breadcrumb label does not appear to match the page title or primary heading.');
+  }
 
   return {
-    missingRequired,
-    missingRecommended
+    status:
+      warnings.length === 0
+        ? 'match'
+        : warnings.length <= 2
+          ? 'partial_match'
+          : 'mismatch',
+    warnings,
+    visibleItems,
+    schemaItems
+  };
+}
+
+function buildBreadcrumbConsistencyRow(breadcrumbConsistency) {
+  if (breadcrumbConsistency.status === 'match') {
+    return {
+      type: 'Breadcrumb Consistency',
+      status: 'Pass',
+      recommendation:
+        'BreadcrumbList schema matches the visible breadcrumb trail.'
+    };
+  }
+
+  if (breadcrumbConsistency.status === 'missing_schema') {
+    return {
+      type: 'Breadcrumb Consistency',
+      status: 'Warning',
+      warnings: breadcrumbConsistency.warnings.join(' | '),
+      recommendation:
+        'Add BreadcrumbList JSON-LD that mirrors the visible breadcrumb labels, order, and URLs.'
+    };
+  }
+
+  if (breadcrumbConsistency.status === 'partial_match') {
+    return {
+      type: 'Breadcrumb Consistency',
+      status: 'Warning',
+      warnings: breadcrumbConsistency.warnings.join(' | '),
+      recommendation:
+        'Align breadcrumb schema labels, positions, and URLs with the visible breadcrumb UI.'
+    };
+  }
+
+  if (breadcrumbConsistency.status === 'mismatch') {
+    return {
+      type: 'Breadcrumb Consistency',
+      status: 'Warning',
+      warnings: breadcrumbConsistency.warnings.join(' | '),
+      recommendation:
+        'Rebuild BreadcrumbList schema from the visible breadcrumb trail to avoid conflicting hierarchy signals.'
+    };
+  }
+
+  return {
+    type: 'Breadcrumb Consistency',
+    status: 'Pass',
+    recommendation:
+      'No breadcrumb UI/schema consistency issue was detected.'
+  };
+}
+
+function buildReviewRatingVisibility({
+  jsonLdDocuments = [],
+  microdataItems = [],
+  visibleReviewData = {}
+}) {
+  const hasAggregateRating =
+    hasSchemaTypeInJsonLd(jsonLdDocuments, 'AggregateRating') ||
+    hasSchemaTypeInMicrodata(microdataItems, 'AggregateRating');
+  const hasReview =
+    hasSchemaTypeInJsonLd(jsonLdDocuments, 'Review') ||
+    hasSchemaTypeInMicrodata(microdataItems, 'Review');
+  const lazyEvidence = Boolean(visibleReviewData.lazyReviewHint);
+  const ratingEvidence = Boolean(visibleReviewData.hasRatingSignal);
+  const reviewEvidence = Boolean(visibleReviewData.hasReviewSignal);
+
+  const ratingVisibilityStatus =
+    !hasAggregateRating
+      ? 'not_claimed'
+      : ratingEvidence
+        ? 'visible'
+        : lazyEvidence
+          ? 'unknown_lazy_loaded'
+          : 'schema_only';
+  const reviewVisibilityStatus =
+    !hasReview
+      ? 'not_claimed'
+      : reviewEvidence
+        ? 'visible'
+        : lazyEvidence
+          ? 'unknown_lazy_loaded'
+          : 'schema_only';
+  const warnings = [];
+
+  if (ratingVisibilityStatus === 'schema_only') {
+    warnings.push({
+      type: 'aggregate_rating_not_visible',
+      priority: 'medium',
+      issue: 'AggregateRating schema is present but visible rating/review evidence was not found',
+      whyItMatters:
+        'Rating markup should reflect review information users can verify on the page.',
+      howToFix:
+        'Show matching rating/review UI near the product content, or remove AggregateRating until reviews are visible.'
+    });
+  }
+
+  if (reviewVisibilityStatus === 'schema_only') {
+    warnings.push({
+      type: 'review_not_visible',
+      priority: 'medium',
+      issue: 'Review schema is present but visible review content was not found',
+      whyItMatters:
+        'Review schema should represent review content available to users.',
+      howToFix:
+        'Render review excerpts/content in the page UI, or remove Review markup until reviews are visible.'
+    });
+  }
+
+  return {
+    reviewVisibilityStatus,
+    ratingVisibilityStatus,
+    warnings,
+    evidence: visibleReviewData
+  };
+}
+
+function buildReviewRatingRows(reviewRatingVisibility) {
+  const rows = [];
+
+  rows.push({
+    type: 'Rating Visibility',
+    status:
+      reviewRatingVisibility.ratingVisibilityStatus === 'schema_only'
+        ? 'Warning'
+        : 'Pass',
+    warnings:
+      reviewRatingVisibility.warnings
+        .filter(warning => warning.type === 'aggregate_rating_not_visible')
+        .map(warning => warning.issue)
+        .join(' | '),
+    recommendation:
+      reviewRatingVisibility.ratingVisibilityStatus === 'unknown_lazy_loaded'
+        ? 'AggregateRating exists and reviews may be lazy-loaded; verify rendered review widgets before changing schema.'
+        : reviewRatingVisibility.ratingVisibilityStatus === 'schema_only'
+          ? 'Make rating/review evidence visible on the page or remove AggregateRating schema.'
+          : 'No rating visibility issue was detected.'
+  });
+
+  rows.push({
+    type: 'Review Visibility',
+    status:
+      reviewRatingVisibility.reviewVisibilityStatus === 'schema_only'
+        ? 'Warning'
+        : 'Pass',
+    warnings:
+      reviewRatingVisibility.warnings
+        .filter(warning => warning.type === 'review_not_visible')
+        .map(warning => warning.issue)
+        .join(' | '),
+    recommendation:
+      reviewRatingVisibility.reviewVisibilityStatus === 'unknown_lazy_loaded'
+        ? 'Review schema exists and reviews may be lazy-loaded; verify rendered review widgets before changing schema.'
+        : reviewRatingVisibility.reviewVisibilityStatus === 'schema_only'
+          ? 'Make review content visible on the page or remove Review schema.'
+          : 'No review visibility issue was detected.'
+  });
+
+  return rows;
+}
+
+function buildProductFieldValidationRow(productFieldValidation) {
+  if (productFieldValidation.status === 'not_applicable') {
+    return {
+      type: 'Product Field Quality',
+      status: 'Pass',
+      recommendation:
+        'Product field quality validation is only required on product pages.'
+    };
+  }
+
+  if (productFieldValidation.status === 'error') {
+    return {
+      type: 'Product Field Quality',
+      status: 'Error',
+      warnings: productFieldValidation.warnings.join(' | '),
+      recommendation:
+        'Add the required Product fields first: name, image, price, and availability.'
+    };
+  }
+
+  if (productFieldValidation.status === 'warning') {
+    return {
+      type: 'Product Field Quality',
+      status: 'Warning',
+      warnings: productFieldValidation.warnings.join(' | '),
+      recommendation:
+        'Keep required fields complete, then add recommended identifiers such as sku, brand, priceCurrency, url, and clean image URLs.'
+    };
+  }
+
+  return {
+    type: 'Product Field Quality',
+    status: 'Pass',
+    recommendation:
+      'Product schema includes the core and recommended commerce fields checked by this audit.'
   };
 }
 
@@ -610,14 +1421,6 @@ function getUnexpectedSchemaTypes(pageType, detectedTypes) {
       type: 'CollectionPage',
       priority: 'medium',
       reason: 'CollectionPage schema should describe Shopify collection pages.'
-    });
-  }
-
-  if (pageType !== 'homepage' && typeSet.has('WebSite')) {
-    unexpected.push({
-      type: 'WebSite',
-      priority: 'low',
-      reason: 'WebSite schema is usually strongest as a homepage/site entity.'
     });
   }
 
@@ -668,6 +1471,42 @@ function getSchemaConflicts(pageType, detectedTypes, productCandidates) {
   }
 
   return conflicts;
+}
+
+function getProductDedupeKey(candidate) {
+  const values = getCandidateIdentityValues(candidate);
+  const identity = values.find(Boolean);
+  if (identity) {
+    return normalizeComparableText(identity);
+  }
+
+  return normalizeComparableText(
+    [
+      getCandidateFieldValues(candidate, ['name'])[0],
+      getCandidateFieldValues(candidate, ['url'])[0]
+    ]
+      .filter(Boolean)
+      .join('|')
+  );
+}
+
+function dedupeProductCandidates(productCandidates = []) {
+  const seen = new Map();
+
+  productCandidates.forEach(candidate => {
+    const key = getProductDedupeKey(candidate);
+    if (!key) {
+      seen.set(Symbol('product'), candidate);
+      return;
+    }
+
+    const existing = seen.get(key);
+    if (!existing || existing.source !== 'json-ld') {
+      seen.set(key, candidate);
+    }
+  });
+
+  return Array.from(seen.values());
 }
 
 function getOrigin(pageUrl) {
@@ -1001,7 +1840,8 @@ function buildSchemaUiConsistency({
   productCandidates,
   visiblePrice,
   visibleAvailability,
-  rawShopifyPrice
+  rawShopifyPrice,
+  selectedVariantId = ''
 }) {
   if (pageType !== 'product') {
     return {
@@ -1014,18 +1854,32 @@ function buildSchemaUiConsistency({
       schemaAvailability: '',
       visibleAvailability: normalizeAvailability(visibleAvailability) || '',
       availabilityMatchStatus: 'not_applicable',
+      selectedVariantId: selectedVariantId || '',
+      selectedVariantPrice: '',
+      selectedVariantAvailability: '',
       consistencyWarnings: []
     };
   }
 
   const primaryCandidate = getPrimaryProductCandidate(productCandidates);
-  const schemaPrice = getSchemaPrice(primaryCandidate) || '';
+  const selectedVariantCandidate = getSelectedVariantCandidate(
+    productCandidates,
+    selectedVariantId
+  );
+  const comparisonCandidate = selectedVariantCandidate || primaryCandidate;
+  const schemaPrice = getSchemaPrice(comparisonCandidate) || '';
   const allSchemaPrices = getAllSchemaPrices(productCandidates);
   const normalizedVisiblePrice = normalizePrice(visiblePrice) || '';
-  const schemaAvailability = getSchemaAvailability(primaryCandidate) || '';
+  const schemaAvailability = getSchemaAvailability(comparisonCandidate) || '';
   const allSchemaAvailabilities = getAllSchemaAvailabilities(productCandidates);
   const normalizedVisibleAvailability =
     normalizeAvailability(visibleAvailability) || '';
+  const selectedVariantPrice = selectedVariantCandidate
+    ? getSchemaPrice(selectedVariantCandidate) || ''
+    : '';
+  const selectedVariantAvailability = selectedVariantCandidate
+    ? getSchemaAvailability(selectedVariantCandidate) || ''
+    : '';
   const rawPriceMatchStatus = getMatchStatus({
     primaryValue: schemaPrice,
     allValues: allSchemaPrices,
@@ -1146,6 +2000,9 @@ function buildSchemaUiConsistency({
     schemaAvailability,
     visibleAvailability: normalizedVisibleAvailability,
     availabilityMatchStatus,
+    selectedVariantId: selectedVariantId || '',
+    selectedVariantPrice,
+    selectedVariantAvailability,
     consistencyWarnings
   };
 }
@@ -1156,6 +2013,7 @@ function buildSchemaScoreBreakdown({
   unexpectedSchemaTypes,
   schemaConflicts,
   consistencyWarnings,
+  qualityWarnings = [],
   jsonLdErrorCount,
   implementationType
 }) {
@@ -1216,6 +2074,19 @@ function buildSchemaScoreBreakdown({
     });
   });
 
+  (qualityWarnings || []).forEach(warning => {
+    deductions.push({
+      category: warning.category || 'Schema quality',
+      points:
+        warning.priority === 'high'
+          ? 8
+          : warning.priority === 'medium'
+            ? 5
+            : 0,
+      reason: warning.issue
+    });
+  });
+
   if (implementationType === 'App-level') {
     deductions.push({
       category: 'Implementation source',
@@ -1243,6 +2114,7 @@ function buildSchemaRecommendations({
   unexpectedSchemaTypes,
   schemaConflicts,
   consistencyWarnings,
+  qualityWarnings = [],
   generatedSchemaSamples,
   implementationType,
   entityStitchingRows
@@ -1313,6 +2185,15 @@ function buildSchemaRecommendations({
   (consistencyWarnings || []).forEach(warning => {
     recommendations.push(createSchemaRecommendation({
       priority: warning.priority,
+      issue: warning.issue,
+      whyItMatters: warning.whyItMatters,
+      howToFix: warning.howToFix
+    }));
+  });
+
+  (qualityWarnings || []).forEach(warning => {
+    recommendations.push(createSchemaRecommendation({
+      priority: warning.priority || 'low',
       issue: warning.issue,
       whyItMatters: warning.whyItMatters,
       howToFix: warning.howToFix
@@ -1634,8 +2515,8 @@ function getVariantIdentity(entity) {
   ).trim();
 }
 
-function getHasVariantIdentities(productGroupEntity) {
-  const hasVariant = productGroupEntity?.hasVariant;
+function getHasVariantIdentities(productGroupEntity, graphIndex = null) {
+  const hasVariant = readJsonLdField(productGroupEntity, 'hasVariant', graphIndex);
   const values = Array.isArray(hasVariant)
     ? hasVariant
     : hasVariant
@@ -1644,16 +2525,17 @@ function getHasVariantIdentities(productGroupEntity) {
 
   return values
     .map(value => {
+      const resolvedValue = resolveJsonLdValue(value, graphIndex);
       if (!value) {
         return '';
       }
 
-      if (typeof value === 'string') {
-        return String(value).trim();
+      if (typeof resolvedValue === 'string') {
+        return String(resolvedValue).trim();
       }
 
-      if (typeof value === 'object') {
-        return getVariantIdentity(value);
+      if (typeof resolvedValue === 'object') {
+        return getVariantIdentity(resolvedValue);
       }
 
       return '';
@@ -1662,6 +2544,7 @@ function getHasVariantIdentities(productGroupEntity) {
 }
 
 function buildPrimaryProductStructureRow(jsonLdDocuments) {
+  const graphIndex = createJsonLdEntityIndex(jsonLdDocuments);
   const productGroups = jsonLdDocuments.flatMap(document =>
     collectEntitiesByTypes(document, new Set(['ProductGroup']))
   );
@@ -1683,7 +2566,7 @@ function buildPrimaryProductStructureRow(jsonLdDocuments) {
   const variantIds = products
     .map(candidate => getVariantIdentity(candidate.entity))
     .filter(Boolean);
-  const hasVariantIds = getHasVariantIdentities(primaryGroup);
+  const hasVariantIds = getHasVariantIdentities(primaryGroup, graphIndex);
 
   if (hasVariantIds.length === 0) {
     return {
@@ -1875,19 +2758,27 @@ function buildSchemaAudit({
   pageType,
   source,
   pageUrl = '',
+  pageTitle = '',
   jsonLdDocuments = [],
   microdataItems = [],
   breadcrumbUiPresent = false,
   breadcrumbLinks = [],
   jsonLdErrorCount = 0,
+  schemaParseErrors = [],
+  visibleReviewData = {},
   visiblePrice = '',
   visibleAvailability = '',
-  rawShopifyPrice = ''
+  rawShopifyPrice = '',
+  selectedVariantId = ''
 }) {
   const targetTypes = new Set(['Product', 'ProductGroup']);
+  const graphIndex = createJsonLdEntityIndex(jsonLdDocuments);
   const jsonLdProductCandidates = jsonLdDocuments.flatMap(document =>
     collectEntitiesByTypes(document, targetTypes)
-  );
+  ).map(candidate => ({
+    ...candidate,
+    graphIndex
+  }));
   const microdataProductCandidates = microdataItems.filter(item =>
     (item.types || []).some(type => targetTypes.has(type))
   );
@@ -1895,6 +2786,7 @@ function buildSchemaAudit({
     ...jsonLdProductCandidates,
     ...microdataProductCandidates
   ];
+  const dedupedProductCandidates = dedupeProductCandidates(productCandidates);
   const allDetectedTypes = Array.from(new Set([
     ...jsonLdDocuments.flatMap(document => Array.from(collectAllSchemaTypes(document))),
     ...microdataItems.flatMap(item => item.types || [])
@@ -1919,15 +2811,76 @@ function buildSchemaAudit({
   const schemaConflicts = getSchemaConflicts(
     pageType,
     allDetectedTypes,
-    productCandidates
+    dedupedProductCandidates
   );
   const consistencyResult = buildSchemaUiConsistency({
     pageType,
-    productCandidates,
+    productCandidates: dedupedProductCandidates,
     visiblePrice,
     visibleAvailability,
-    rawShopifyPrice
+    rawShopifyPrice,
+    selectedVariantId
   });
+  const productFieldValidation = buildProductFieldValidation(
+    pageType,
+    dedupedProductCandidates
+  );
+  const breadcrumbConsistency = buildBreadcrumbConsistency({
+    pageType,
+    pageUrl,
+    pageTitle,
+    jsonLdDocuments,
+    microdataItems,
+    breadcrumbUiPresent,
+    breadcrumbLinks
+  });
+  const reviewRatingVisibility = buildReviewRatingVisibility({
+    jsonLdDocuments,
+    microdataItems,
+    visibleReviewData
+  });
+  const qualityWarnings = [
+    ...reviewRatingVisibility.warnings.map(warning => ({
+      ...warning,
+      category: 'Review/rating trust'
+    })),
+    ...breadcrumbConsistency.warnings.map(issue => ({
+      priority:
+        breadcrumbConsistency.status === 'mismatch' ||
+        breadcrumbConsistency.status === 'missing_schema'
+          ? 'medium'
+          : 'low',
+      issue,
+      category: 'Breadcrumb consistency',
+      whyItMatters:
+        'Breadcrumb schema should match the visible breadcrumb trail so search engines and users see the same hierarchy.',
+      howToFix:
+        'Align BreadcrumbList names, positions, and URLs with the visible breadcrumb UI.'
+    })),
+    ...productFieldValidation.recommended
+      .filter(item => item.status === 'recommended' || item.status === 'warning')
+      .map(item => ({
+        priority: 'low',
+        issue: `${item.field} is ${item.status === 'warning' ? 'invalid-looking' : 'recommended'} in Product schema`,
+        category: 'Product field quality',
+        whyItMatters:
+          'Complete commerce fields improve product understanding and downstream feed/schema consistency.',
+        howToFix:
+          `Add or correct ${item.field} in the primary Product or Offer schema.`
+      })),
+    ...productFieldValidation.optional
+      .filter(item => item.status === 'warning')
+      .map(item => ({
+        priority: 'low',
+        issue: `${item.field} has an invalid-looking value`,
+        category: 'Product identifier quality',
+        whyItMatters:
+          'Optional identifiers help product matching only when the values are accurate.',
+        howToFix:
+          `Correct ${item.field} or omit it until a valid identifier is available.`
+      }))
+  ];
+
   const generatedSchemaSamples = buildGeneratedSchemaSamples({
     pageType,
     pageUrl,
@@ -1946,7 +2899,7 @@ function buildSchemaAudit({
   ];
   const richResultSummary = buildRichResultSummary({
     pageType,
-    productCandidates,
+    productCandidates: dedupedProductCandidates,
     detectedTypes: allDetectedTypes,
     missingRequired,
     missingRecommended
@@ -1957,12 +2910,14 @@ function buildSchemaAudit({
     unexpectedSchemaTypes,
     schemaConflicts,
     consistencyWarnings: consistencyResult.consistencyWarnings,
+    qualityWarnings,
     jsonLdErrorCount,
     implementationType
   });
   const rows = [
-    buildGoogleEligibilityRow(pageType, productCandidates),
-    buildRichResultWarningsRow(pageType, productCandidates),
+    buildGoogleEligibilityRow(pageType, dedupedProductCandidates),
+    buildProductFieldValidationRow(productFieldValidation),
+    buildRichResultWarningsRow(pageType, dedupedProductCandidates),
     buildMerchantCenterSyncRow(pageType, consistencyResult),
     ...entityRows,
     buildBreadcrumbFormatRow(
@@ -1970,9 +2925,11 @@ function buildSchemaAudit({
       microdataItems,
       breadcrumbUiPresent
     ),
+    buildBreadcrumbConsistencyRow(breadcrumbConsistency),
+    ...buildReviewRatingRows(reviewRatingVisibility),
     buildSchemaScopeRow(pageType, allDetectedTypes),
     buildPrimaryProductStructureRow(jsonLdDocuments),
-    buildShopifyConflictRow(productCandidates),
+    buildShopifyConflictRow(dedupedProductCandidates),
     buildImplementationRow({ implementationType, pageType, hasSchema })
   ];
   const schemaRecommendations = buildSchemaRecommendations({
@@ -1983,6 +2940,7 @@ function buildSchemaAudit({
     unexpectedSchemaTypes,
     schemaConflicts,
     consistencyWarnings: consistencyResult.consistencyWarnings,
+    qualityWarnings,
     generatedSchemaSamples,
     implementationType,
     entityStitchingRows: entityRows
@@ -2001,6 +2959,19 @@ function buildSchemaAudit({
     schemaRecommendations,
     generatedSchemaSamples,
     schemaScoreBreakdown,
+    schemaParseErrors,
+    productFieldValidation,
+    qualityWarnings,
+    breadcrumbConsistencyStatus: breadcrumbConsistency.status,
+    breadcrumbConsistencyWarnings: breadcrumbConsistency.warnings,
+    breadcrumbConsistency,
+    reviewVisibilityStatus: reviewRatingVisibility.reviewVisibilityStatus,
+    ratingVisibilityStatus: reviewRatingVisibility.ratingVisibilityStatus,
+    reviewRatingWarnings: reviewRatingVisibility.warnings,
+    selectedVariantId: consistencyResult.selectedVariantId || '',
+    selectedVariantPrice: consistencyResult.selectedVariantPrice || '',
+    selectedVariantAvailability:
+      consistencyResult.selectedVariantAvailability || '',
     ...consistencyResult,
     rows
   };

@@ -6,16 +6,7 @@ const {
   normalizeAvailability
 } = require('../audits/schemaAudit');
 const { detectShopifyPageType } = require('../utils/pageTypeDetector');
-
-const REQUIRED_SCHEMAS_BY_PAGE_TYPE = {
-  homepage: ['Organization', 'WebSite'],
-  product: ['Product'],
-  collection: ['CollectionPage', 'BreadcrumbList'],
-  blog: ['Article'],
-  page: ['WebPage'],
-  search: ['SearchResultsPage'],
-  webpage: ['WebPage']
-};
+const { buildMissingSchemas } = require('../utils/schemaRules');
 
 const SCHEMA_ALIASES = {
   product: 'Product',
@@ -45,6 +36,10 @@ const SCHEMA_ALIASES = {
 
 
 const PRICE_CANDIDATE_SELECTORS = [
+  { selector: 'select[name="id"] option[selected][data-price]', source: 'selected variant data-price', score: 180, allowPlainNumber: true },
+  { selector: 'option[selected][data-variant-qty][data-price]', source: 'selected variant data-price', score: 175, allowPlainNumber: true },
+  { selector: 'button[name="add"][data-product-price]', source: 'add-to-cart product price', score: 150, allowPlainNumber: true },
+  { selector: 'button[data-product-price]', source: 'button product price', score: 130, allowPlainNumber: true },
   { selector: '[itemprop="price"]', source: 'itemprop=price', score: 120, allowPlainNumber: true },
   { selector: '[data-product-price]', source: 'data-product-price', score: 115, allowPlainNumber: true },
   { selector: '[data-price]', source: 'data-price', score: 105, allowPlainNumber: true },
@@ -63,19 +58,32 @@ const PRICE_CANDIDATE_SELECTORS = [
 ];
 
 function normalizeText(value) {
-  return String(value || '').replace(/\s+/g, ' ').trim();
+  return String(value || '')
+    .replace(/&rsaquo;|&raquo;|&gt;/gi, match => {
+      const normalized = match.toLowerCase();
+      if (normalized === '&gt;') return '>';
+      if (normalized === '&raquo;') return '\u00bb';
+      return '\u203a';
+    })
+    .replace(/\u00e2\u201a\u00b9/g, '\u20b9')
+    .replace(/\u00e2\u20ac\u00ba/g, '\u203a')
+    .replace(/\u00c2\u00bb/g, '\u00bb')
+    .replace(/\u00e2\u2020\u2019/g, '\u2192')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function hasCurrencyPrice(text) {
-  return /(?:₹|rs\.?|inr)\s*[0-9]/i.test(text) || /[0-9][0-9,]*(?:\.\d{1,2})?\s*(?:₹|rs\.?|inr)/i.test(text);
+  const normalized = normalizeText(text);
+  return /(?:\u20b9|rs\.?|inr)\s*[0-9]/i.test(normalized) || /[0-9][0-9,]*(?:\.\d{1,2})?\s*(?:\u20b9|rs\.?|inr)/i.test(normalized);
 }
 
 function extractCurrencyPriceTokens(text) {
   const normalized = normalizeText(text);
   const tokens = [];
   const patterns = [
-    /(?:₹|rs\.?|inr)\s*([0-9][0-9,]*(?:\.\d{1,2})?)/gi,
-    /([0-9][0-9,]*(?:\.\d{1,2})?)\s*(?:₹|rs\.?|inr)/gi
+    /(?:\u20b9|rs\.?|inr)\s*([0-9][0-9,]*(?:\.\d{1,2})?)/gi,
+    /([0-9][0-9,]*(?:\.\d{1,2})?)\s*(?:\u20b9|rs\.?|inr)/gi
   ];
 
   patterns.forEach(pattern => {
@@ -93,7 +101,61 @@ function extractCurrencyPriceTokens(text) {
 }
 
 function hasRejectedPriceContext(text) {
-  return /(lowest\s+price\s+in\s+last\s+\d+\s+days|last\s+\d+\s+days|\b\d+\s+days\b|countdown|timer|hurry|offer\s+ending|coupon|promo\s+code|code\s*:|free\s+return|people\s+bought|save\s+extra|as\s+low\s+as|get\s+it\s+for|final\s+price|pick\s+any|buy\s+\d+|flat\s+\d+%|\boff\b|discount)/i.test(text);
+  return /(lowest\s+price\s+in\s+last\s+\d+\s+days|last\s+\d+\s+days|\b\d+\s+days\b|countdown|timer|hurry|offer\s+ending|coupon|promo\s+code|code\s*:|free\s+return|people\s+bought|save\s+extra|as\s+low\s+as|get\s+it\s+for|final\s+price|pick\s+any|buy\s+\d+|flat\s+\d+%|\boff\b|discount|shop\s+the\s+full\s+look|complete\s+the\s+look|frequently\s+bought\s+together|bundle|combo|upsell|cross-?sell|recommended)/i.test(text);
+}
+
+function hasRejectedMerchandisingContext($, element, contextText = '') {
+  if (!element) {
+    return /(shop\s+the\s+full\s+look|complete\s+the\s+look|frequently\s+bought\s+together|bundle|combo|upsell|cross-?sell|recommended)/i.test(contextText);
+  }
+
+  const node = $(element);
+  const attributeText = normalizeText(
+    Object.entries(element.attribs || {})
+      .map(([key, value]) => `${key} ${value}`)
+      .join(' ')
+  );
+  const moduleSelector = [
+    '[data-testid^="stl-full-look-product-price" i]',
+    '[data-testid^="stl-full-look-product-compare-price" i]',
+    '[data-testid^="stl-full-look-product-discount" i]',
+    '[data-testid*="full-look" i]',
+    '[data-testid*="complete-look" i]',
+    '[data-testid*="frequently-bought" i]',
+    '[data-testid*="bundle" i]',
+    '[data-testid*="combo" i]',
+    '[data-testid*="upsell" i]',
+    '[data-testid*="cross-sell" i]',
+    '[class*="full-look" i]',
+    '[class*="complete-look" i]',
+    '[class*="frequently-bought" i]',
+    '[class*="bundle" i]',
+    '[class*="combo" i]',
+    '[class*="upsell" i]',
+    '[class*="cross-sell" i]',
+    '[id*="full-look" i]',
+    '[id*="complete-look" i]',
+    '[id*="frequently-bought" i]',
+    '[id*="bundle" i]',
+    '[id*="combo" i]',
+    '[id*="upsell" i]',
+    '[id*="cross-sell" i]'
+  ].join(',');
+  const module = node.closest(moduleSelector);
+  const moduleText = module.length
+    ? normalizeText(
+        [
+          module.attr('class'),
+          module.attr('id'),
+          module.attr('data-testid'),
+          module.find('h2,h3,h4,[data-testid*="title" i]').first().text()
+        ].join(' ')
+      )
+    : '';
+
+  return /(stl-full-look|shop\s+the\s+full\s+look|complete\s+the\s+look|frequently\s+bought\s+together|bundle|combo|upsell|cross-?sell|recommended)/i.test(
+    `${attributeText} ${moduleText} ${contextText}`
+  );
 }
 
 function hasRejectedCurrencyTokenContext(text, token) {
@@ -104,7 +166,7 @@ function hasRejectedCurrencyTokenContext(text, token) {
   const after = normalized.slice(tokenEnd, Math.min(normalized.length, tokenEnd + 70));
   const localContext = `${before} ${after}`;
 
-  // Discount amounts usually read "₹400 OFF"; do not let them beat the selling price.
+  // Discount amounts usually read "Rs. 400 OFF"; do not let them beat the selling price.
   if (/^\s*(?:off|discount|cashback|saved?|extra|back)\b/i.test(after)) {
     return true;
   }
@@ -131,14 +193,23 @@ function hasMrpContext(text, element) {
 
 function getElementContext($, element) {
   const node = $(element);
-  const ownText = normalizeText(node.attr('content') || node.attr('data-product-price') || node.attr('data-price') || node.text());
+  const ownText = normalizeText(
+    node.attr('content') ||
+      node.attr('data-product-price') ||
+      node.attr('data-price') ||
+      node.attr('data-product-price') ||
+      node.text()
+  );
   const classSource = normalizeText(
     [
       node.attr('class'),
       node.attr('id'),
+      node.attr('data-testid'),
+      node.attr('name'),
       node.parent().attr('class'),
       node.parent().attr('id'),
-      node.closest('[class*="product" i], [class*="price" i], [class*="cart" i], [class*="offer" i]').attr('class')
+      node.closest('form[action*="/cart/add"], [class*="product" i], [class*="price" i], [class*="cart" i], [class*="offer" i], [class*="buy" i]').attr('class'),
+      node.closest('form[action*="/cart/add"]').attr('action')
     ].join(' ')
   );
 
@@ -154,6 +225,12 @@ function scorePriceCandidate({ $, element, selectorConfig, token, candidateText 
     ? getElementContext($, element)
     : { ownText: candidateText, classSource: '', combined: candidateText };
   const directText = context.ownText || candidateText;
+  const combinedContext = `${directText} ${context.classSource}`;
+
+  if (hasRejectedMerchandisingContext($, element, combinedContext)) {
+    return null;
+  }
+
   const shouldUseTokenAwareContext =
     selectorConfig?.tokenAwareOnly ||
     extractCurrencyPriceTokens(directText).length > 1;
@@ -176,8 +253,11 @@ function scorePriceCandidate({ $, element, selectorConfig, token, candidateText 
   let score = selectorConfig?.score || 30;
 
   if (hasCurrency) score += 40;
-  if (/(product__info|product-info|product-meta|product-form|product-single|main-product|buy-buttons|add-to-cart|cart\/add)/i.test(context.classSource)) {
+  if (/(product__info|product-info|product-meta|product-form|product-single|main-product|buy-buttons|add-to-cart|cart\/add|name addmain|selected variant|variant)/i.test(context.classSource)) {
     score += 25;
+  }
+  if (/form|cart\/add|button product price|add-to-cart|selected variant/i.test(`${selectorConfig?.source || ''} ${context.classSource}`)) {
+    score += 35;
   }
   if (/(sale|selling|current|final-price|price__sale)/i.test(context.classSource)) {
     score += 10;
@@ -297,7 +377,10 @@ function collectPriceValuesFromObject(value, found = []) {
   Object.entries(value).forEach(([key, child]) => {
     if (/^(price|price_min|price_max|compare_at_price|compare_at_price_min|compare_at_price_max)$/i.test(key)) {
       if (typeof child === 'number' || /^\d+$/.test(String(child || ''))) {
-        found.push(String(child));
+        found.push({
+          value: String(child),
+          kind: /^compare_at/i.test(key) ? 'compare_at' : 'price'
+        });
       }
     }
 
@@ -309,33 +392,52 @@ function collectPriceValuesFromObject(value, found = []) {
 
 function selectRawShopifyPrice(candidates = [], visiblePrice = '') {
   const normalizedVisiblePrice = Number(normalizePrice(visiblePrice));
-  const uniqueCandidates = Array.from(new Set(candidates.filter(Boolean)));
+  const normalizedCandidates = candidates
+    .map(candidate =>
+      typeof candidate === 'object'
+        ? candidate
+        : { value: String(candidate || ''), kind: 'price' }
+    )
+    .filter(candidate => candidate.value);
+  const uniqueCandidates = Array.from(
+    new Map(
+      normalizedCandidates.map(candidate => [
+        `${candidate.kind}:${candidate.value}`,
+        candidate
+      ])
+    ).values()
+  );
+  const sellingPriceCandidates = uniqueCandidates.filter(
+    candidate => candidate.kind !== 'compare_at'
+  );
+  const preferredCandidates =
+    sellingPriceCandidates.length > 0 ? sellingPriceCandidates : uniqueCandidates;
 
   if (uniqueCandidates.length === 0) {
     return '';
   }
 
   if (Number.isFinite(normalizedVisiblePrice)) {
-    const minorUnitMatch = uniqueCandidates.find(candidate => {
-      const raw = Number(candidate);
+    const minorUnitMatch = preferredCandidates.find(candidate => {
+      const raw = Number(candidate.value);
       return Number.isFinite(raw) && Math.abs(raw / 100 - normalizedVisiblePrice) < 0.01;
     });
 
     if (minorUnitMatch) {
-      return minorUnitMatch;
+      return minorUnitMatch.value;
     }
 
-    const majorUnitMatch = uniqueCandidates.find(candidate => {
-      const raw = Number(candidate);
+    const majorUnitMatch = preferredCandidates.find(candidate => {
+      const raw = Number(candidate.value);
       return Number.isFinite(raw) && Math.abs(raw - normalizedVisiblePrice) < 0.01;
     });
 
     if (majorUnitMatch) {
-      return majorUnitMatch;
+      return majorUnitMatch.value;
     }
   }
 
-  return uniqueCandidates[0];
+  return preferredCandidates[0].value;
 }
 
 function extractRawShopifyPrice($, html = '', visiblePrice = '') {
@@ -364,7 +466,10 @@ function extractRawShopifyPrice($, html = '', visiblePrice = '') {
     const pricePattern = /["']?(price|price_min|price_max|compare_at_price|compare_at_price_min|compare_at_price_max)["']?\s*:\s*["']?(\d{3,})(?!\.)["']?/gi;
     let match;
     while ((match = pricePattern.exec(content)) !== null) {
-      candidates.push(match[2]);
+      candidates.push({
+        value: match[2],
+        kind: /^compare_at/i.test(match[1]) ? 'compare_at' : 'price'
+      });
     }
   });
 
@@ -373,7 +478,7 @@ function extractRawShopifyPrice($, html = '', visiblePrice = '') {
       Object.values(element.attribs || {}).forEach(value => {
         const match = String(value || '').match(/\b\d{3,}\b/);
         if (match) {
-          candidates.push(match[0]);
+          candidates.push({ value: match[0], kind: 'price' });
         }
       });
     });
@@ -381,7 +486,170 @@ function extractRawShopifyPrice($, html = '', visiblePrice = '') {
   return selectRawShopifyPrice(candidates, visiblePrice);
 }
 
-function extractVisibleAvailability($) {
+function extractSelectedVariantId($, html = '', pageUrl = '') {
+  try {
+    const variantFromUrl = new URL(pageUrl).searchParams.get('variant');
+    if (variantFromUrl) {
+      return variantFromUrl;
+    }
+  } catch (error) {
+    // Continue with DOM/script detection when the page URL is not parseable.
+  }
+
+  const selectors = [
+    'input[name="id"][value]',
+    'select[name="id"] option[selected][value]',
+    '[data-selected-variant-id]',
+    '[data-current-variant-id]',
+    '[data-variant-id][aria-selected="true"]',
+    '[data-variant-id].is-selected',
+    '[data-variant-id].selected'
+  ];
+
+  for (const selector of selectors) {
+    const match = $(selector).first();
+    const value =
+      match.attr('value') ||
+      match.attr('data-selected-variant-id') ||
+      match.attr('data-current-variant-id') ||
+      match.attr('data-variant-id') ||
+      '';
+
+    if (value) {
+      return String(value).trim();
+    }
+  }
+
+  const scriptMatch = String(html || '').match(
+    /(?:selectedVariantId|current_variant_id|currentVariantId|variantId)["']?\s*[:=]\s*["']?(\d{5,})/i
+  );
+
+  return scriptMatch?.[1] || '';
+}
+
+function normalizeVariantQuantityAvailability(value) {
+  const quantity = Number(String(value || '').trim());
+
+  if (!Number.isFinite(quantity)) {
+    return '';
+  }
+
+  return quantity > 0 ? 'in_stock' : 'out_of_stock';
+}
+
+function getSelectedVariantOption($, selectedVariantId = '') {
+  if (selectedVariantId) {
+    const byValue = $(`option[value="${selectedVariantId}"]`).first();
+    if (byValue.length > 0) {
+      return byValue;
+    }
+
+    const byDataId = $(`[data-variant-id="${selectedVariantId}"]`).first();
+    if (byDataId.length > 0) {
+      return byDataId;
+    }
+  }
+
+  const selectedOption = $('select[name="id"] option[selected], option[selected][data-variant-qty], option[selected][data-stock]')
+    .first();
+  if (selectedOption.length > 0) {
+    return selectedOption;
+  }
+
+  return $('input[name="id"][value]').first();
+}
+
+function readVariantAvailabilityFromElement(node) {
+  const quantityAvailability =
+    normalizeVariantQuantityAvailability(node.attr('data-variant-qty')) ||
+    normalizeVariantQuantityAvailability(node.attr('data-inventory-quantity')) ||
+    normalizeVariantQuantityAvailability(node.attr('data-quantity'));
+
+  if (quantityAvailability) {
+    return quantityAvailability;
+  }
+
+  return normalizeAvailability(
+    [
+      node.attr('data-availability'),
+      node.attr('data-stock'),
+      node.attr('data-inventory-policy'),
+      node.attr('aria-label'),
+      node.attr('value'),
+      node.text()
+    ]
+      .filter(Boolean)
+      .join(' ')
+  );
+}
+
+function readNearestAddToCartAvailability($, selectedNode = null) {
+  const form = selectedNode?.length
+    ? selectedNode.closest('form[action*="/cart/add"]')
+    : $('form[action*="/cart/add"]').first();
+  const searchRoot = form?.length ? form : $('body');
+  const buttons = searchRoot
+    .find('button[name="add"], button[type="submit"], [data-product-price]')
+    .add(searchRoot.is('button') ? searchRoot : $())
+    .filter((_, element) => {
+      const node = $(element);
+      const text = normalizeText(
+        [
+          node.attr('aria-label'),
+          node.attr('value'),
+          node.text(),
+          node.attr('disabled') !== undefined ? 'sold out' : ''
+        ]
+          .filter(Boolean)
+          .join(' ')
+      );
+
+      return /(add\s+to\s+cart|buy\s+now|sold\s+out|notify\s+me|unavailable|pre-?order|back-?order)/i.test(text);
+    })
+    .toArray();
+
+  for (const button of buttons) {
+    const node = $(button);
+    const text = normalizeText(
+      [
+        node.attr('aria-label'),
+        node.attr('value'),
+        node.text(),
+        node.attr('disabled') !== undefined ? 'sold out' : ''
+      ]
+        .filter(Boolean)
+        .join(' ')
+    );
+    const availability = normalizeAvailability(text);
+
+    if (availability) {
+      return availability;
+    }
+  }
+
+  return '';
+}
+
+function extractVisibleAvailability($, selectedVariantId = '') {
+  const selectedVariantNode = getSelectedVariantOption($, selectedVariantId);
+  if (selectedVariantNode.length > 0) {
+    const selectedVariantAvailability =
+      readVariantAvailabilityFromElement(selectedVariantNode);
+
+    if (selectedVariantAvailability) {
+      return selectedVariantAvailability;
+    }
+  }
+
+  const nearestButtonAvailability = readNearestAddToCartAvailability(
+    $,
+    selectedVariantNode
+  );
+
+  if (nearestButtonAvailability) {
+    return nearestButtonAvailability;
+  }
+
   const selectors = [
     '[itemprop="availability"]',
     '[data-product-availability]',
@@ -391,10 +659,7 @@ function extractVisibleAvailability($) {
     '.inventory',
     '.stock',
     '.availability',
-    '.sold-out',
-    '.product-form__submit',
-    'button[name="add"]',
-    'button[type="submit"]'
+    '.product-form__submit'
   ];
 
   for (const selector of selectors) {
@@ -426,6 +691,42 @@ function extractVisibleAvailability($) {
 
   const bodyText = $('body').text().replace(/\s+/g, ' ').trim();
   return normalizeAvailability(bodyText.match(/sold out|out of stock|pre-?order|back-?order/i)?.[0] || '');
+}
+
+function extractVisibleReviewData($) {
+  const bodyText = normalizeText($('body').text());
+  const reviewContainers = [
+    '[class*="review" i]',
+    '[id*="review" i]',
+    '[data-review]',
+    '[class*="rating" i]',
+    '[id*="rating" i]',
+    '[aria-label*="rating" i]'
+  ].join(',');
+  const containerText = normalizeText(
+    $(reviewContainers)
+      .map((_, element) => $(element).text())
+      .get()
+      .join(' ')
+  );
+  const combinedText = `${containerText} ${bodyText}`;
+  const lazyReviewHint =
+    /judgeme|judge\.me|loox|yotpo|stamped|okendo|reviews-widget|shopify-product-reviews|spr-badge|data-review/i
+      .test($.html() || '');
+  const hasRatingSignal =
+    /(\b[1-5](?:\.\d)?\s*(?:out of|\/)\s*5\b|\bstar(?:s)?\b|\brating\b)/i
+      .test(combinedText);
+  const hasReviewSignal =
+    /(\bcustomer reviews?\b|\breviews?\b|\bverified buyer\b|\bwrite a review\b|\bbased on\s+\d+\s+reviews?\b)/i
+      .test(combinedText) ||
+    $(reviewContainers).length > 0;
+
+  return {
+    hasReviewSignal,
+    hasRatingSignal,
+    lazyReviewHint,
+    evidence: normalizeText(containerText || combinedText).slice(0, 200)
+  };
 }
 
 function toBreadcrumbLabel(segment) {
@@ -544,7 +845,7 @@ function buildBreadcrumbListSample(pageUrl, breadcrumbLinks = []) {
 }
 
 function hasBreadcrumbTrailText(text) {
-  const normalized = String(text || '')
+  const normalized = normalizeText(text)
     .replace(/\s+/g, ' ')
     .trim();
 
@@ -552,7 +853,15 @@ function hasBreadcrumbTrailText(text) {
     return false;
   }
 
-  return /(home\s*(>|\/|›|»|→).+\s*(>|\/|›|»|→).+)/i.test(normalized);
+  return /(home\s*(>|\/|\u203a|\u00bb|\u2192|&rsaquo;).+\s*(>|\/|\u203a|\u00bb|\u2192|&rsaquo;).+)/i.test(normalized);
+}
+
+function hasBreadcrumbEvidence(links = [], text = '') {
+  if ((links || []).length >= 2) {
+    return true;
+  }
+
+  return hasBreadcrumbTrailText(text);
 }
 
 function extractBreadcrumbLinksFromElement($, element, pageUrl = '') {
@@ -593,8 +902,9 @@ function extractBreadcrumbTrailFromCheerio($, pageUrl = '') {
 
   for (const element of explicitElements) {
     const links = extractBreadcrumbLinksFromElement($, element, pageUrl);
+    const text = $(element).text();
 
-    if (links.length > 0) {
+    if (hasBreadcrumbEvidence(links, text)) {
       return {
         present: true,
         links
@@ -602,7 +912,10 @@ function extractBreadcrumbTrailFromCheerio($, pageUrl = '') {
     }
   }
 
-  if (explicitElements.length > 0) {
+  const explicitTrailText = explicitElements
+    .map(element => $(element).text())
+    .join(' ');
+  if (explicitElements.length > 0 && hasBreadcrumbTrailText(explicitTrailText)) {
     return {
       present: true,
       links: []
@@ -618,7 +931,7 @@ function extractBreadcrumbTrailFromCheerio($, pageUrl = '') {
     const links = $(el).find('a');
     const text = $(el).text();
 
-    if (links.length >= 2 && hasBreadcrumbTrailText(text)) {
+    if (hasBreadcrumbEvidence(extractBreadcrumbLinksFromElement($, el, pageUrl), text)) {
       trail = {
         present: true,
         links: extractBreadcrumbLinksFromElement($, el, pageUrl)
@@ -739,6 +1052,32 @@ function countSchemaObjects(value, seen = new WeakSet()) {
   return count;
 }
 
+function getJsonParseErrorLocation(rawContent, error) {
+  const positionMatch = String(error?.message || '').match(/position\s+(\d+)/i);
+  const position = positionMatch ? Number(positionMatch[1]) : null;
+
+  if (!Number.isFinite(position)) {
+    return {
+      position: null,
+      line: null,
+      column: null,
+      snippet: rawContent.slice(0, 200)
+    };
+  }
+
+  const before = rawContent.slice(0, position);
+  const lines = before.split(/\r?\n/);
+  const start = Math.max(0, position - 100);
+  const end = Math.min(rawContent.length, position + 100);
+
+  return {
+    position,
+    line: lines.length,
+    column: lines[lines.length - 1].length + 1,
+    snippet: rawContent.slice(start, end)
+  };
+}
+
 function parseJsonLdScripts(scriptContents = []) {
   const detected = new Set();
   const errors = [];
@@ -746,7 +1085,7 @@ function parseJsonLdScripts(scriptContents = []) {
   let parsedScriptCount = 0;
   let schemaObjectCount = 0;
 
-  scriptContents.forEach(content => {
+  scriptContents.forEach((content, index) => {
     const rawContent = String(content || '').trim();
 
     if (!rawContent) {
@@ -760,11 +1099,21 @@ function parseJsonLdScripts(scriptContents = []) {
       collectSchemaTypes(parsed, detected);
       schemaObjectCount += countSchemaObjects(parsed);
     } catch (error) {
+      const location = getJsonParseErrorLocation(rawContent, error);
       errors.push({
+        scriptIndex: index,
         message: error.message,
-        snippet: rawContent.slice(0, 200)
+        line: location.line,
+        column: location.column,
+        position: location.position,
+        snippet: location.snippet,
+        parsedOtherBlocks: false
       });
     }
+  });
+
+  errors.forEach(error => {
+    error.parsedOtherBlocks = parsedScriptCount > 0;
   });
 
   return {
@@ -775,23 +1124,6 @@ function parseJsonLdScripts(scriptContents = []) {
     parsedDocuments,
     errors
   };
-}
-
-function buildMissingSchemas(pageType, detectedSchemas) {
-  const required = REQUIRED_SCHEMAS_BY_PAGE_TYPE[pageType] || [];
-  const detected = new Set(detectedSchemas);
-
-  return required.filter(schema => {
-    if (schema === 'Product') {
-      return !detected.has('Product') && !detected.has('ProductGroup');
-    }
-
-    if (schema === 'Article') {
-      return !detected.has('Article') && !detected.has('BlogPosting');
-    }
-
-    return !detected.has(schema);
-  });
 }
 
 function buildBreadcrumbSchemaIssue(detectedSchemas, breadcrumbUiPresent) {
@@ -817,7 +1149,10 @@ function buildStructuredDataResult(
   visiblePrice = '',
   visiblePriceSource = '',
   visibleAvailability = '',
-  rawShopifyPrice = ''
+  rawShopifyPrice = '',
+  selectedVariantId = '',
+  visibleReviewData = {},
+  pageTitle = ''
 ) {
   const normalizedBreadcrumbTrail =
     typeof breadcrumbTrail === 'boolean'
@@ -831,7 +1166,11 @@ function buildStructuredDataResult(
   const combinedDetectedSchemas = Array.from(
     new Set([...(parseResult.detectedSchemas || []), ...microdataTypes])
   ).sort();
-  const missingSchemas = buildMissingSchemas(pageType, combinedDetectedSchemas);
+  const missingSchemas = buildMissingSchemas(
+    pageType,
+    combinedDetectedSchemas,
+    breadcrumbUiPresent
+  );
   const issues = [];
   const recommendations = [];
   const breadcrumbIssue = buildBreadcrumbSchemaIssue(
@@ -863,14 +1202,18 @@ function buildStructuredDataResult(
     pageType,
     source,
     pageUrl,
+    pageTitle,
     jsonLdDocuments: parseResult.parsedDocuments,
     microdataItems,
     breadcrumbUiPresent,
     breadcrumbLinks: normalizedBreadcrumbTrail.links || [],
     jsonLdErrorCount: parseResult.errors.length,
+    schemaParseErrors: parseResult.errors,
+    visibleReviewData,
     visiblePrice,
     visibleAvailability,
-    rawShopifyPrice
+    rawShopifyPrice,
+    selectedVariantId
   });
 
   (schemaAudit.consistencyWarnings || []).forEach(warning => {
@@ -894,12 +1237,34 @@ function buildStructuredDataResult(
     });
   });
 
+  (schemaAudit.qualityWarnings || []).forEach(warning => {
+    if (warning.priority === 'low') {
+      return;
+    }
+
+    issues.push({
+      type: warning.type || 'schema-quality',
+      severity: warning.priority === 'high' ? 'high' : 'warning',
+      message: warning.issue,
+      recommendation: warning.howToFix,
+      details: {
+        category: warning.category || ''
+      }
+    });
+  });
+
   const generatedSchemaSamples = {
     ...(schemaAudit.generatedSchemaSamples || {})
   };
   if (generatedSchemaSample && !generatedSchemaSamples.breadcrumbList) {
     generatedSchemaSamples.breadcrumbList = generatedSchemaSample;
   }
+  const jsonLdTypeSet = new Set(parseResult.detectedSchemas || []);
+  const uniqueMicrodataItemCount = microdataItems.filter(
+    item => !(item.types || []).some(type => jsonLdTypeSet.has(type))
+  ).length;
+  const detectedItemCount =
+    parseResult.schemaObjectCount + uniqueMicrodataItemCount;
 
   return {
     detectedSchemas: combinedDetectedSchemas,
@@ -914,6 +1279,7 @@ function buildStructuredDataResult(
     parsedScriptCount: parseResult.parsedScriptCount,
     schemaObjectCount: parseResult.schemaObjectCount,
     jsonLdErrors: parseResult.errors,
+    schemaParseErrors: schemaAudit.schemaParseErrors || parseResult.errors,
     hasStructuredData:
       parseResult.scriptCount > 0 || microdataItems.length > 0,
     schemaTypes: combinedDetectedSchemas,
@@ -940,12 +1306,23 @@ function buildStructuredDataResult(
     schemaAvailability: schemaAudit.schemaAvailability || '',
     visibleAvailability: schemaAudit.visibleAvailability || '',
     availabilityMatchStatus: schemaAudit.availabilityMatchStatus || '',
+    breadcrumbConsistencyStatus:
+      schemaAudit.breadcrumbConsistencyStatus || '',
+    breadcrumbConsistencyWarnings:
+      schemaAudit.breadcrumbConsistencyWarnings || [],
+    reviewVisibilityStatus: schemaAudit.reviewVisibilityStatus || '',
+    ratingVisibilityStatus: schemaAudit.ratingVisibilityStatus || '',
+    productFieldValidation: schemaAudit.productFieldValidation || {},
+    qualityWarnings: schemaAudit.qualityWarnings || [],
+    selectedVariantId: schemaAudit.selectedVariantId || selectedVariantId || '',
+    selectedVariantPrice: schemaAudit.selectedVariantPrice || '',
+    selectedVariantAvailability: schemaAudit.selectedVariantAvailability || '',
     consistencyWarnings: schemaAudit.consistencyWarnings || [],
     visiblePrice: normalizePrice(visiblePrice) || '',
     visiblePriceSource,
     totalDetectedItems:
-      parseResult.schemaObjectCount + microdataItems.length > 0
-        ? parseResult.schemaObjectCount + microdataItems.length
+      detectedItemCount > 0
+        ? detectedItemCount
         : combinedDetectedSchemas.length > 0
           ? combinedDetectedSchemas.length
           : 0
@@ -964,7 +1341,10 @@ function extractStructuredDataFromHtml(html, pageType, pageUrl = '') {
   const visiblePriceResult = extractVisiblePriceResult($);
   const visiblePrice = visiblePriceResult.value;
   const rawShopifyPrice = extractRawShopifyPrice($, html, visiblePrice);
-  const visibleAvailability = extractVisibleAvailability($);
+  const selectedVariantId = extractSelectedVariantId($, html, pageUrl);
+  const visibleAvailability = extractVisibleAvailability($, selectedVariantId);
+  const visibleReviewData = extractVisibleReviewData($);
+  const pageTitle = normalizeText($('h1').first().text() || $('title').text());
 
   return buildStructuredDataResult(
     effectivePageType,
@@ -976,7 +1356,10 @@ function extractStructuredDataFromHtml(html, pageType, pageUrl = '') {
     visiblePrice,
     visiblePriceResult.source,
     visibleAvailability,
-    rawShopifyPrice
+    rawShopifyPrice,
+    selectedVariantId,
+    visibleReviewData,
+    pageTitle
   );
 }
 
@@ -1018,7 +1401,7 @@ async function extractStructuredDataWithPuppeteer(url, pageType) {
         const links = node.querySelectorAll('a').length;
         const text = (node.textContent || '').replace(/\s+/g, ' ').trim();
 
-        return links >= 3 && /home\s*(>|\/|›|»|→).+\s*(>|\/|›|»|→).+/i.test(text);
+        return links >= 3 && /home\s*(>|\/|\u203a|\u00bb|\u2192|&rsaquo;).+\s*(>|\/|\u203a|\u00bb|\u2192|&rsaquo;).+/i.test(text);
       });
 
       const priceSelectors = [
@@ -1046,13 +1429,23 @@ async function extractStructuredDataWithPuppeteer(url, pageType) {
 
       if (!visiblePrice) {
         const bodyText = (document.body?.textContent || '').replace(/\s+/g, ' ').trim();
-        const fallbackMatch = bodyText.match(/(?:Rs\.?|INR)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/i);
+        const fallbackMatch = bodyText.match(/(?:\u20b9|Rs\.?|INR)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)/i);
         visiblePrice = fallbackMatch ? fallbackMatch[1] : '';
       }
+
+      const selectedVariantId =
+        new URL(window.location.href).searchParams.get('variant') ||
+        document.querySelector('input[name="id"][value]')?.getAttribute('value') ||
+        document.querySelector('select[name="id"] option[selected][value]')?.getAttribute('value') ||
+        document.querySelector('[data-selected-variant-id]')?.getAttribute('data-selected-variant-id') ||
+        document.querySelector('[data-current-variant-id]')?.getAttribute('data-current-variant-id') ||
+        document.querySelector('[data-variant-id][aria-selected="true"], [data-variant-id].is-selected, [data-variant-id].selected')?.getAttribute('data-variant-id') ||
+        '';
 
       return {
         scriptContents,
         visiblePrice,
+        selectedVariantId,
         breadcrumbUiPresent: selectorMatches > 0 || breadcrumbTrail
       };
     });
@@ -1063,12 +1456,23 @@ async function extractStructuredDataWithPuppeteer(url, pageType) {
     const renderedMicrodataItems = extractMicrodataItems(rendered$);
     const breadcrumbTrail = extractBreadcrumbTrailFromCheerio(rendered$, url);
     const visiblePriceResult = extractVisiblePriceResult(rendered$);
+    const selectedVariantId =
+      extractSelectedVariantId(rendered$, renderedHtml, url) ||
+      renderedData.selectedVariantId ||
+      '';
     const rawShopifyPrice = extractRawShopifyPrice(
       rendered$,
       renderedHtml,
       visiblePriceResult.value || renderedData.visiblePrice
     );
-    const visibleAvailability = extractVisibleAvailability(rendered$);
+    const visibleAvailability = extractVisibleAvailability(
+      rendered$,
+      selectedVariantId
+    );
+    const visibleReviewData = extractVisibleReviewData(rendered$);
+    const pageTitle = normalizeText(
+      rendered$('h1').first().text() || rendered$('title').text()
+    );
 
     return buildStructuredDataResult(
       pageType,
@@ -1080,7 +1484,10 @@ async function extractStructuredDataWithPuppeteer(url, pageType) {
       visiblePriceResult.value || normalizePrice(renderedData.visiblePrice) || '',
       visiblePriceResult.source,
       visibleAvailability,
-      rawShopifyPrice
+      rawShopifyPrice,
+      selectedVariantId,
+      visibleReviewData,
+      pageTitle
     );
   } catch (error) {
     return {

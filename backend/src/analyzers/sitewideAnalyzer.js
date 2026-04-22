@@ -1,5 +1,7 @@
+const { buildCoverageMap } = require('../utils/schemaRules');
+
 function normalizeField(value) {
-  return (value || '').replace(/s+/g, ' ').trim().toLowerCase();
+  return (value || '').replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
 function buildDuplicateMap(pages, field) {
@@ -283,17 +285,7 @@ function appendStructuredDataFinding(index, page, finding, findings) {
 function analyzeStructuredData(pages) {
   const findings = [];
   const pageFindings = new Map();
-  const coverageByType = {
-    Product: 0,
-    ProductGroup: 0,
-    BreadcrumbList: 0,
-    ItemList: 0,
-    Article: 0,
-    BlogPosting: 0,
-    FAQPage: 0,
-    Organization: 0,
-    WebSite: 0
-  };
+  const coverageByType = buildCoverageMap();
 
   pages.forEach(page => {
     const structuredData = page.structuredData || {};

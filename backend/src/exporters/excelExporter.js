@@ -95,6 +95,33 @@ function buildSummaryRows(summary) {
   ];
 }
 
+function formatParseErrors(errors = []) {
+  return (errors || [])
+    .map(error => {
+      const location = [
+        error.scriptIndex !== undefined ? `script ${error.scriptIndex}` : '',
+        error.line ? `line ${error.line}` : '',
+        error.column ? `column ${error.column}` : ''
+      ]
+        .filter(Boolean)
+        .join(', ');
+
+      return [location, error.message].filter(Boolean).join(': ');
+    })
+    .join(' | ');
+}
+
+function formatProductFieldValidation(validation = {}) {
+  return [
+    ...(validation.required || []),
+    ...(validation.recommended || []),
+    ...(validation.optional || []).filter(item => item.status === 'warning')
+  ]
+    .filter(item => item.status && item.status !== 'pass' && item.status !== 'not_present')
+    .map(item => `${item.field}: ${item.status}`)
+    .join(' | ');
+}
+
 function buildPageRows(pages) {
   const rows = [[
     'URL',
@@ -127,6 +154,15 @@ function buildPageRows(pages) {
     'Schema Availability',
     'Visible Availability',
     'Availability Match Status',
+    'Schema Parse Diagnostics',
+    'Product Field Validation',
+    'Breadcrumb Consistency Status',
+    'Breadcrumb Consistency Warnings',
+    'Review Visibility Status',
+    'Rating Visibility Status',
+    'Selected Variant ID',
+    'Selected Variant Price',
+    'Selected Variant Availability',
     'Consistency Warnings',
     'Schema Item Count',
     'Schema Confidence',
@@ -200,6 +236,33 @@ function buildPageRows(pages) {
       schemaReport.schemaAvailability || page.schemaAvailability || '',
       schemaReport.visibleAvailability || page.visibleAvailability || '',
       schemaReport.availabilityMatchStatus || page.availabilityMatchStatus || '',
+      formatParseErrors(
+        schemaReport.schemaParseErrors ||
+          page.schemaParseErrors ||
+          structuredData.schemaParseErrors ||
+          structuredData.jsonLdErrors ||
+          []
+      ),
+      formatProductFieldValidation(
+        schemaReport.productFieldValidation ||
+          page.productFieldValidation ||
+          {}
+      ),
+      schemaReport.breadcrumbConsistencyStatus ||
+        page.breadcrumbConsistencyStatus ||
+        '',
+      (
+        schemaReport.breadcrumbConsistencyWarnings ||
+        page.breadcrumbConsistencyWarnings ||
+        []
+      ).join(' | '),
+      schemaReport.reviewVisibilityStatus || page.reviewVisibilityStatus || '',
+      schemaReport.ratingVisibilityStatus || page.ratingVisibilityStatus || '',
+      schemaReport.selectedVariantId || page.selectedVariantId || '',
+      schemaReport.selectedVariantPrice || page.selectedVariantPrice || '',
+      schemaReport.selectedVariantAvailability ||
+        page.selectedVariantAvailability ||
+        '',
       (schemaReport.consistencyWarnings || page.consistencyWarnings || [])
         .map(item => item.issue || item)
         .join(' | '),
@@ -228,9 +291,9 @@ function buildPageRows(pages) {
       structuredData.parsedScriptCount || 0,
       structuredData.microdataItemCount || 0,
       structuredData.schemaAudit?.implementationType || '',
-      (structuredData.jsonLdErrors || [])
-        .map(item => item.message)
-        .join(' | '),
+      formatParseErrors(
+        structuredData.schemaParseErrors || structuredData.jsonLdErrors || []
+      ),
       page.wordCount,
       (page.issues || []).map(formatIssueForExport).join(' | '),
       (page.duplicates || []).map(item => item.type).join(', '),

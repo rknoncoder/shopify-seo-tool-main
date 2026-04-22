@@ -52,6 +52,19 @@ const exportAuditToExcel = require('./exporters/excelExporter');
     schemaAvailability: page.structuredDataReport.schemaAvailability,
     visibleAvailability: page.structuredDataReport.visibleAvailability,
     availabilityMatchStatus: page.structuredDataReport.availabilityMatchStatus,
+    schemaParseErrors: page.structuredDataReport.schemaParseErrors,
+    productFieldValidation: page.structuredDataReport.productFieldValidation,
+    qualityWarnings: page.structuredDataReport.qualityWarnings,
+    breadcrumbConsistencyStatus:
+      page.structuredDataReport.breadcrumbConsistencyStatus,
+    breadcrumbConsistencyWarnings:
+      page.structuredDataReport.breadcrumbConsistencyWarnings,
+    reviewVisibilityStatus: page.structuredDataReport.reviewVisibilityStatus,
+    ratingVisibilityStatus: page.structuredDataReport.ratingVisibilityStatus,
+    selectedVariantId: page.structuredDataReport.selectedVariantId,
+    selectedVariantPrice: page.structuredDataReport.selectedVariantPrice,
+    selectedVariantAvailability:
+      page.structuredDataReport.selectedVariantAvailability,
     consistencyWarnings: page.structuredDataReport.consistencyWarnings,
     confidence: page.structuredDataReport.confidence,
     issues: page.structuredDataReport.issues,

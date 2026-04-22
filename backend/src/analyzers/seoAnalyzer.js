@@ -127,6 +127,19 @@ function analyzeSEO(page, sitewideData = {}) {
     schemaAvailability: structuredDataReport.schemaAvailability,
     visibleAvailability: structuredDataReport.visibleAvailability,
     availabilityMatchStatus: structuredDataReport.availabilityMatchStatus,
+    schemaParseErrors: structuredDataReport.schemaParseErrors,
+    productFieldValidation: structuredDataReport.productFieldValidation,
+    qualityWarnings: structuredDataReport.qualityWarnings,
+    breadcrumbConsistencyStatus:
+      structuredDataReport.breadcrumbConsistencyStatus,
+    breadcrumbConsistencyWarnings:
+      structuredDataReport.breadcrumbConsistencyWarnings,
+    reviewVisibilityStatus: structuredDataReport.reviewVisibilityStatus,
+    ratingVisibilityStatus: structuredDataReport.ratingVisibilityStatus,
+    selectedVariantId: structuredDataReport.selectedVariantId,
+    selectedVariantPrice: structuredDataReport.selectedVariantPrice,
+    selectedVariantAvailability:
+      structuredDataReport.selectedVariantAvailability,
     consistencyWarnings: structuredDataReport.consistencyWarnings,
     issues: [...issues, ...collectionDuplicateIssues],
     duplicates: duplicateFindings,
@@ -265,6 +278,20 @@ function buildStructuredDataReport(page, findings) {
     schemaAvailability: structuredData.schemaAvailability || '',
     visibleAvailability: structuredData.visibleAvailability || '',
     availabilityMatchStatus: structuredData.availabilityMatchStatus || '',
+    schemaParseErrors:
+      structuredData.schemaParseErrors || structuredData.jsonLdErrors || [],
+    productFieldValidation: structuredData.productFieldValidation || {},
+    qualityWarnings: structuredData.qualityWarnings || [],
+    breadcrumbConsistencyStatus:
+      structuredData.breadcrumbConsistencyStatus || '',
+    breadcrumbConsistencyWarnings:
+      structuredData.breadcrumbConsistencyWarnings || [],
+    reviewVisibilityStatus: structuredData.reviewVisibilityStatus || '',
+    ratingVisibilityStatus: structuredData.ratingVisibilityStatus || '',
+    selectedVariantId: structuredData.selectedVariantId || '',
+    selectedVariantPrice: structuredData.selectedVariantPrice || '',
+    selectedVariantAvailability:
+      structuredData.selectedVariantAvailability || '',
     consistencyWarnings: structuredData.consistencyWarnings || [],
     confidence: schema.confidence,
     issues: structuredData.issues || [],

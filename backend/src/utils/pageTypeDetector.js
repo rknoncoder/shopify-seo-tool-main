@@ -35,7 +35,22 @@ function detectPageTypeFromUrl(url) {
   return '';
 }
 
-function detectPageTypeFromHtml($, html = '') {
+function isRootUrl(url = '') {
+  try {
+    const parsedUrl = new URL(url);
+    const path = parsedUrl.pathname.replace(/\/+$/, '') || '/';
+    return path === '/';
+  } catch (error) {
+    return false;
+  }
+}
+
+function detectPageTypeFromHtml($, html = '', url = '') {
+  const urlType = detectPageTypeFromUrl(url);
+  if (urlType && urlType !== 'homepage') {
+    return urlType;
+  }
+
   const bodyClass = $('body').attr('class') || '';
   const templateClass = $('[class*="template-"]')
     .map((_, element) => $(element).attr('class') || '')
@@ -64,7 +79,7 @@ function detectPageTypeFromHtml($, html = '') {
   const normalizedMetaType = normalizeDetectedPageType(metaPageType);
   if (normalizedMetaType === 'product') return 'product';
   if (normalizedMetaType === 'article') return 'blog';
-  if (normalizedMetaType === 'website') return 'homepage';
+  if (normalizedMetaType === 'website' && isRootUrl(url)) return 'homepage';
   if (SHOPIFY_PAGE_TYPE_ALIASES[normalizedMetaType]) {
     return SHOPIFY_PAGE_TYPE_ALIASES[normalizedMetaType];
   }
@@ -89,8 +104,13 @@ function detectPageTypeFromHtml($, html = '') {
 }
 
 function detectShopifyPageType({ url = '', html = '', $ = null, fallback = '' }) {
+  const urlType = detectPageTypeFromUrl(url);
+  if (urlType && urlType !== 'homepage') {
+    return urlType;
+  }
+
   if ($) {
-    const htmlType = detectPageTypeFromHtml($, html);
+    const htmlType = detectPageTypeFromHtml($, html, url);
     if (htmlType) {
       return htmlType;
     }
@@ -101,12 +121,13 @@ function detectShopifyPageType({ url = '', html = '', $ = null, fallback = '' })
     return fallbackType;
   }
 
-  return detectPageTypeFromUrl(url) || 'webpage';
+  return urlType || 'webpage';
 }
 
 module.exports = {
   detectPageTypeFromUrl,
   detectPageTypeFromHtml,
   detectShopifyPageType,
+  isRootUrl,
   normalizeDetectedPageType
 };
