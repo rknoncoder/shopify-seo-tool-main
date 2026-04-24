@@ -1,4 +1,5 @@
 const { buildCoverageMap } = require('../utils/schemaRules');
+const { isRawAuditMode } = require('../utils/auditMode');
 
 function normalizeField(value) {
   return (value || '').replace(/\s+/g, ' ').trim().toLowerCase();
@@ -286,6 +287,7 @@ function analyzeStructuredData(pages) {
   const findings = [];
   const pageFindings = new Map();
   const coverageByType = buildCoverageMap();
+  const rawMode = isRawAuditMode();
 
   pages.forEach(page => {
     const structuredData = page.structuredData || {};
@@ -297,7 +299,7 @@ function analyzeStructuredData(pages) {
       if (coverageByType[type] !== undefined) coverageByType[type] += 1;
     });
 
-    if (!structuredData.hasStructuredData) {
+    if (!rawMode && !structuredData.hasStructuredData) {
       appendStructuredDataFinding(pageFindings, page, {
         type: 'missingStructuredData',
         severity: 'warning',
@@ -306,7 +308,7 @@ function analyzeStructuredData(pages) {
       }, findings);
     }
 
-    if (jsonLdErrors.length > 0) {
+    if (!rawMode && jsonLdErrors.length > 0) {
       appendStructuredDataFinding(pageFindings, page, {
         type: 'structuredDataParseError',
         severity: 'critical',
@@ -316,7 +318,7 @@ function analyzeStructuredData(pages) {
       }, findings);
     }
 
-    (structuredData.issues || []).forEach(issue => {
+    if (!rawMode) (structuredData.issues || []).forEach(issue => {
       appendStructuredDataFinding(pageFindings, page, {
         type: issue.type,
         severity: issue.severity,
@@ -326,7 +328,7 @@ function analyzeStructuredData(pages) {
       }, findings);
     });
 
-    if (page.url && /^(https?:\/\/[^/]+)\/?$/.test(page.url)) {
+    if (!rawMode && page.url && /^(https?:\/\/[^/]+)\/?$/.test(page.url)) {
       if (!schemaTypeSet.has('Organization')) {
         appendStructuredDataFinding(pageFindings, page, {
           type: 'missingHomepageOrganizationSchema',
@@ -346,7 +348,7 @@ function analyzeStructuredData(pages) {
       }
     }
 
-    if (page.pageType === 'product' && !schemaTypeSet.has('Product') && !schemaTypeSet.has('ProductGroup')) {
+    if (!rawMode && page.pageType === 'product' && !schemaTypeSet.has('Product') && !schemaTypeSet.has('ProductGroup')) {
       appendStructuredDataFinding(pageFindings, page, {
         type: 'missingProductSchema',
         severity: 'critical',
@@ -355,7 +357,7 @@ function analyzeStructuredData(pages) {
       }, findings);
     }
 
-    if (page.pageType === 'blog' && !schemaTypeSet.has('Article') && !schemaTypeSet.has('BlogPosting')) {
+    if (!rawMode && page.pageType === 'blog' && !schemaTypeSet.has('Article') && !schemaTypeSet.has('BlogPosting')) {
       appendStructuredDataFinding(pageFindings, page, {
         type: 'missingArticleSchema',
         severity: 'warning',

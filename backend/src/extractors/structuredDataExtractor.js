@@ -7,6 +7,7 @@ const {
 } = require('../audits/schemaAudit');
 const { detectShopifyPageType } = require('../utils/pageTypeDetector');
 const { buildMissingSchemas } = require('../utils/schemaRules');
+const { isRawAuditMode } = require('../utils/auditMode');
 
 const SCHEMA_ALIASES = {
   product: 'Product',
@@ -352,7 +353,14 @@ function extractVisiblePriceResult($) {
     value: best?.value || '',
     source: best
       ? `${best.source}: ${best.text.slice(0, 120)}`
-      : 'not detected'
+      : 'not detected',
+    candidates: sorted.map(candidate => ({
+      value: candidate.value,
+      label: candidate.source,
+      source: candidate.source,
+      context: candidate.text,
+      isMrp: candidate.isMrp
+    }))
   };
 }
 
@@ -440,9 +448,9 @@ function selectRawShopifyPrice(candidates = [], visiblePrice = '') {
   return preferredCandidates[0].value;
 }
 
-function extractRawShopifyPrice($, html = '', visiblePrice = '') {
+function extractRawShopifyPriceCandidates($, html = '') {
   if (!/Shopify|cdn\.shopify\.com|\/cart\/add|ProductJson|data-product-json/i.test(html)) {
-    return '';
+    return [];
   }
 
   const candidates = [];
@@ -457,7 +465,12 @@ function extractRawShopifyPrice($, html = '', visiblePrice = '') {
 
     if (/json/i.test(type)) {
       try {
+        const beforeCount = candidates.length;
         collectPriceValuesFromObject(JSON.parse(content), candidates);
+        candidates.slice(beforeCount).forEach(candidate => {
+          candidate.source = type || 'script json';
+          candidate.context = 'JSON script price field';
+        });
       } catch (error) {
         // Fall through to regex extraction for app/theme payloads that are JS-like.
       }
@@ -468,7 +481,9 @@ function extractRawShopifyPrice($, html = '', visiblePrice = '') {
     while ((match = pricePattern.exec(content)) !== null) {
       candidates.push({
         value: match[2],
-        kind: /^compare_at/i.test(match[1]) ? 'compare_at' : 'price'
+        kind: /^compare_at/i.test(match[1]) ? 'compare_at' : 'price',
+        source: match[1],
+        context: content.slice(Math.max(0, match.index - 80), match.index + 120)
       });
     }
   });
@@ -478,10 +493,34 @@ function extractRawShopifyPrice($, html = '', visiblePrice = '') {
       Object.values(element.attribs || {}).forEach(value => {
         const match = String(value || '').match(/\b\d{3,}\b/);
         if (match) {
-          candidates.push({ value: match[0], kind: 'price' });
+          candidates.push({
+            value: match[0],
+            kind: 'price',
+            source: 'data attribute',
+            context: String(value || '').slice(0, 160)
+          });
         }
       });
     });
+
+  return candidates.map(candidate => ({
+    rawValue: String(candidate.value || ''),
+    normalizedValue: normalizePrice(
+      Number(candidate.value) > 999 ? Number(candidate.value) / 100 : candidate.value
+    ),
+    kind: candidate.kind || 'price',
+    source: candidate.source || '',
+    context: normalizeText(candidate.context || '')
+  }));
+}
+
+function extractRawShopifyPrice($, html = '', visiblePrice = '') {
+  const candidates = extractRawShopifyPriceCandidates($, html).map(candidate => ({
+    value: candidate.rawValue,
+    kind: candidate.kind,
+    source: candidate.source,
+    context: candidate.context
+  }));
 
   return selectRawShopifyPrice(candidates, visiblePrice);
 }
@@ -691,6 +730,73 @@ function extractVisibleAvailability($, selectedVariantId = '') {
 
   const bodyText = $('body').text().replace(/\s+/g, ' ').trim();
   return normalizeAvailability(bodyText.match(/sold out|out of stock|pre-?order|back-?order/i)?.[0] || '');
+}
+
+function extractVisibleAvailabilityCandidates($, selectedVariantId = '') {
+  const candidates = [];
+  const selectedVariantNode = getSelectedVariantOption($, selectedVariantId);
+
+  if (selectedVariantNode.length > 0) {
+    const availability = readVariantAvailabilityFromElement(selectedVariantNode);
+    if (availability) {
+      candidates.push({
+        value: availability,
+        selector: 'selected variant',
+        context: normalizeText(selectedVariantNode.text() || selectedVariantNode.attr('value') || '')
+      });
+    }
+  }
+
+  const nearestButtonAvailability = readNearestAddToCartAvailability(
+    $,
+    selectedVariantNode
+  );
+  if (nearestButtonAvailability) {
+    candidates.push({
+      value: nearestButtonAvailability,
+      selector: 'nearest add-to-cart button',
+      context: 'nearest selected product form'
+    });
+  }
+
+  [
+    '[itemprop="availability"]',
+    '[data-product-availability]',
+    '[data-availability]',
+    '[data-stock]',
+    '.product__inventory',
+    '.inventory',
+    '.stock',
+    '.availability',
+    '.product-form__submit'
+  ].forEach(selector => {
+    $(selector).each((_, element) => {
+      const node = $(element);
+      const text = [
+        node.attr('content'),
+        node.attr('data-product-availability'),
+        node.attr('data-availability'),
+        node.attr('data-stock'),
+        node.attr('aria-label'),
+        node.attr('value'),
+        node.text(),
+        node.attr('disabled') !== undefined ? 'disabled' : ''
+      ]
+        .filter(Boolean)
+        .join(' ');
+      const value = normalizeAvailability(text);
+
+      if (value) {
+        candidates.push({
+          value,
+          selector,
+          context: normalizeText(text).slice(0, 200)
+        });
+      }
+    });
+  });
+
+  return candidates;
 }
 
 function extractVisibleReviewData($) {
@@ -1013,6 +1119,177 @@ function collectSchemaTypes(value, detected = new Set(), seen = new WeakSet()) {
   return detected;
 }
 
+function getTypeList(value) {
+  const types = Array.isArray(value?.['@type'])
+    ? value['@type']
+    : value?.['@type']
+      ? [value['@type']]
+      : [];
+
+  return types.map(normalizeSchemaType).filter(Boolean);
+}
+
+function collectSchemaEntities(value, predicate, found = [], seen = new WeakSet()) {
+  if (!value) {
+    return found;
+  }
+
+  if (Array.isArray(value)) {
+    value.forEach(item => collectSchemaEntities(item, predicate, found, seen));
+    return found;
+  }
+
+  if (typeof value !== 'object') {
+    return found;
+  }
+
+  if (seen.has(value)) {
+    return found;
+  }
+
+  seen.add(value);
+
+  if (predicate(value, getTypeList(value))) {
+    found.push(value);
+  }
+
+  Object.entries(value).forEach(([key, child]) => {
+    if (key === '@context') {
+      return;
+    }
+
+    collectSchemaEntities(child, predicate, found, seen);
+  });
+
+  return found;
+}
+
+function valueToText(value) {
+  if (value === undefined || value === null) {
+    return '';
+  }
+
+  if (typeof value === 'string' || typeof value === 'number') {
+    return String(value).trim();
+  }
+
+  if (Array.isArray(value)) {
+    return value.map(valueToText).find(Boolean) || '';
+  }
+
+  if (typeof value === 'object') {
+    return valueToText(
+      value.name ||
+        value.url ||
+        value.href ||
+        value.item ||
+        value['@id'] ||
+        value.price ||
+        value.priceCurrency ||
+        value.availability
+    );
+  }
+
+  return '';
+}
+
+function uniqueList(values = []) {
+  return Array.from(new Set(values.map(valueToText).filter(Boolean)));
+}
+
+function getSchemaOffers(parsedDocuments = []) {
+  return parsedDocuments.flatMap(document =>
+    collectSchemaEntities(document, (_, types) =>
+      types.some(type => type === 'Offer' || type === 'AggregateOffer')
+    )
+  );
+}
+
+function getSchemaProducts(parsedDocuments = []) {
+  return parsedDocuments.flatMap(document =>
+    collectSchemaEntities(document, (_, types) =>
+      types.some(type => type === 'Product' || type === 'ProductGroup')
+    )
+  );
+}
+
+function collectBreadcrumbSchemaItems(parsedDocuments = []) {
+  return parsedDocuments
+    .flatMap(document =>
+      collectSchemaEntities(document, (_, types) => types.includes('BreadcrumbList'))
+    )
+    .flatMap(entity => {
+      const items = Array.isArray(entity.itemListElement)
+        ? entity.itemListElement
+        : entity.itemListElement
+          ? [entity.itemListElement]
+          : [];
+
+      return items.map((item, index) => ({
+        name: valueToText(item.name || item.item?.name),
+        url: valueToText(item.item?.url || item.item || item.url),
+        position: item.position || index + 1
+      }));
+    });
+}
+
+function collectProductUrlCandidates($, pageUrl = '') {
+  return $('a[href*="/products/"]')
+    .map((_, element) => {
+      const href = $(element).attr('href') || '';
+      return resolveBreadcrumbUrl(pageUrl, href) || href;
+    })
+    .get()
+    .filter(Boolean)
+    .filter((url, index, all) => all.indexOf(url) === index);
+}
+
+function buildRawSchemaEvidence({
+  pageUrl,
+  pageType,
+  scripts = [],
+  parseResult,
+  parsedSchemaTypes = [],
+  visiblePriceResult = {},
+  rawShopifyPriceCandidates = [],
+  visibleAvailabilityCandidates = [],
+  breadcrumbUiCandidates = [],
+  productUrlCandidates = []
+}) {
+  const schemaTypes = parsedSchemaTypes.length > 0
+    ? parsedSchemaTypes
+    : parseResult.detectedSchemas || [];
+  const products = getSchemaProducts(parseResult.parsedDocuments || []);
+  const offers = getSchemaOffers(parseResult.parsedDocuments || []);
+
+  return {
+    url: pageUrl,
+    pageTypeGuess: pageType,
+    schemaJsonLdRawBlocks: scripts,
+    parsedSchemaTypes: schemaTypes,
+    schemaParseErrors: parseResult.errors || [],
+    schemaProductNames: uniqueList(products.map(product => product.name)),
+    schemaProductUrls: uniqueList(products.map(product => product.url || product['@id'])),
+    schemaOfferPrices: uniqueList(offers.map(offer => offer.price || offer.lowPrice || offer.highPrice)),
+    schemaOfferCurrencies: uniqueList(offers.map(offer => offer.priceCurrency)),
+    schemaOfferAvailability: uniqueList(offers.map(offer => offer.availability)),
+    schemaOfferUrls: uniqueList(offers.map(offer => offer.url || offer['@id'])),
+    schemaBrands: uniqueList(products.map(product => product.brand || product.manufacturer)),
+    visiblePriceCandidates: visiblePriceResult.candidates || [],
+    rawShopifyPriceCandidates,
+    visibleAvailabilityCandidates,
+    breadcrumbUiCandidates,
+    breadcrumbSchemaItems: collectBreadcrumbSchemaItems(parseResult.parsedDocuments || []),
+    productUrlCandidates,
+    duplicateUrlCandidates: [],
+    hasProductSchema: schemaTypes.includes('Product') || schemaTypes.includes('ProductGroup'),
+    hasOfferSchema: schemaTypes.includes('Offer') || schemaTypes.includes('AggregateOffer'),
+    hasBreadcrumbSchema: schemaTypes.includes('BreadcrumbList'),
+    hasCollectionPageSchema: schemaTypes.includes('CollectionPage'),
+    hasParseErrors: (parseResult.errors || []).length > 0
+  };
+}
+
 function countSchemaObjects(value, seen = new WeakSet()) {
   if (!value) {
     return 0;
@@ -1050,6 +1327,34 @@ function countSchemaObjects(value, seen = new WeakSet()) {
   });
 
   return count;
+}
+
+function extractBreadcrumbUiCandidates($, pageUrl = '') {
+  const candidates = [];
+  const selectors = [
+    'nav[aria-label="Breadcrumb" i]',
+    'nav[aria-label*="breadcrumb" i]',
+    'nav[aria-label*="breadcrumbs" i]',
+    '.breadcrumb',
+    '.breadcrumbs',
+    '.b-crumbs',
+    '[class*="breadcrumb" i]',
+    '[class*="breadcrumbs" i]',
+    '[class*="b-crumbs" i]',
+    '[data-testid*="breadcrumb" i]'
+  ];
+
+  $(selectors.join(',')).each((_, element) => {
+    const links = extractBreadcrumbLinksFromElement($, element, pageUrl);
+    candidates.push({
+      selector: selectors.find(selector => $(element).is(selector)) || 'breadcrumb-like element',
+      names: links.map(link => link.name),
+      urls: links.map(link => link.item || link.href || ''),
+      context: normalizeText($(element).text()).slice(0, 260)
+    });
+  });
+
+  return candidates;
 }
 
 function getJsonParseErrorLocation(rawContent, error) {
@@ -1144,16 +1449,22 @@ function buildStructuredDataResult(
   parseResult,
   source,
   pageUrl,
+  scripts = [],
   breadcrumbTrail = { present: false, links: [] },
   microdataItems = [],
-  visiblePrice = '',
-  visiblePriceSource = '',
+  visiblePriceResult = {},
   visibleAvailability = '',
   rawShopifyPrice = '',
+  rawShopifyPriceCandidates = [],
+  visibleAvailabilityCandidates = [],
+  breadcrumbUiCandidates = [],
+  productUrlCandidates = [],
   selectedVariantId = '',
   visibleReviewData = {},
   pageTitle = ''
 ) {
+  const visiblePrice = visiblePriceResult.value || '';
+  const visiblePriceSource = visiblePriceResult.source || '';
   const normalizedBreadcrumbTrail =
     typeof breadcrumbTrail === 'boolean'
       ? { present: breadcrumbTrail, links: [] }
@@ -1198,23 +1509,72 @@ function buildStructuredDataResult(
     confidence = parseResult.parsedScriptCount > 0 ? 'high' : 'medium';
   }
 
-  const schemaAudit = buildSchemaAudit({
-    pageType,
-    source,
+  const rawEvidence = buildRawSchemaEvidence({
     pageUrl,
-    pageTitle,
-    jsonLdDocuments: parseResult.parsedDocuments,
-    microdataItems,
-    breadcrumbUiPresent,
-    breadcrumbLinks: normalizedBreadcrumbTrail.links || [],
-    jsonLdErrorCount: parseResult.errors.length,
-    schemaParseErrors: parseResult.errors,
-    visibleReviewData,
-    visiblePrice,
-    visibleAvailability,
-    rawShopifyPrice,
-    selectedVariantId
+    pageType,
+    scripts,
+    parseResult,
+    parsedSchemaTypes: combinedDetectedSchemas,
+    visiblePriceResult,
+    rawShopifyPriceCandidates,
+    visibleAvailabilityCandidates,
+    breadcrumbUiCandidates,
+    productUrlCandidates
   });
+  const rawMode = isRawAuditMode();
+  const schemaAudit = rawMode
+    ? {
+        implementationType: source === 'puppeteer' ? 'App-level' : 'Theme-level',
+        visiblePrice: normalizePrice(visiblePrice) || '',
+        detectedSchemaTypes: combinedDetectedSchemas,
+        expectedSchemaTypes: [],
+        missingRequiredSchema: [],
+        missingRecommendedSchema: [],
+        unexpectedSchemaTypes: [],
+        schemaConflicts: [],
+        richResultSummary: {},
+        schemaRecommendations: [],
+        generatedSchemaSamples: {},
+        schemaScoreBreakdown: {},
+        schemaParseErrors: parseResult.errors,
+        productFieldValidation: {},
+        qualityWarnings: [],
+        breadcrumbConsistencyStatus: '',
+        breadcrumbConsistencyWarnings: [],
+        reviewVisibilityStatus: '',
+        ratingVisibilityStatus: '',
+        reviewRatingWarnings: [],
+        selectedVariantId: selectedVariantId || '',
+        selectedVariantPrice: '',
+        selectedVariantAvailability: '',
+        schemaPrice: '',
+        rawShopifyPrice: rawShopifyPrice || '',
+        priceMatchStatus: '',
+        priceUnitStatus: '',
+        priceDebugNote: '',
+        schemaAvailability: '',
+        visibleAvailability: normalizeAvailability(visibleAvailability) || '',
+        availabilityMatchStatus: '',
+        consistencyWarnings: [],
+        rows: []
+      }
+    : buildSchemaAudit({
+        pageType,
+        source,
+        pageUrl,
+        pageTitle,
+        jsonLdDocuments: parseResult.parsedDocuments,
+        microdataItems,
+        breadcrumbUiPresent,
+        breadcrumbLinks: normalizedBreadcrumbTrail.links || [],
+        jsonLdErrorCount: parseResult.errors.length,
+        schemaParseErrors: parseResult.errors,
+        visibleReviewData,
+        visiblePrice,
+        visibleAvailability,
+        rawShopifyPrice,
+        selectedVariantId
+      });
 
   (schemaAudit.consistencyWarnings || []).forEach(warning => {
     issues.push({
@@ -1268,13 +1628,15 @@ function buildStructuredDataResult(
 
   return {
     detectedSchemas: combinedDetectedSchemas,
-    missingSchemas,
+    missingSchemas: rawMode ? [] : missingSchemas,
     confidence,
     source,
+    auditMode: rawMode ? 'raw' : 'evaluated',
+    rawEvidence,
     breadcrumbUiPresent,
     breadcrumbLinks: normalizedBreadcrumbTrail.links || [],
-    issues,
-    recommendations,
+    issues: rawMode ? [] : issues,
+    recommendations: rawMode ? [] : recommendations,
     scriptCount: parseResult.scriptCount,
     parsedScriptCount: parseResult.parsedScriptCount,
     schemaObjectCount: parseResult.schemaObjectCount,
@@ -1289,13 +1651,13 @@ function buildStructuredDataResult(
     generatedSchemaSample,
     generatedSchemaSamples,
     detectedSchemaTypes: schemaAudit.detectedSchemaTypes || combinedDetectedSchemas,
-    expectedSchemaTypes: schemaAudit.expectedSchemaTypes || [],
-    missingRequiredSchema: schemaAudit.missingRequiredSchema || [],
-    missingRecommendedSchema: schemaAudit.missingRecommendedSchema || [],
-    unexpectedSchemaTypes: schemaAudit.unexpectedSchemaTypes || [],
-    schemaConflicts: schemaAudit.schemaConflicts || [],
+    expectedSchemaTypes: rawMode ? [] : schemaAudit.expectedSchemaTypes || [],
+    missingRequiredSchema: rawMode ? [] : schemaAudit.missingRequiredSchema || [],
+    missingRecommendedSchema: rawMode ? [] : schemaAudit.missingRecommendedSchema || [],
+    unexpectedSchemaTypes: rawMode ? [] : schemaAudit.unexpectedSchemaTypes || [],
+    schemaConflicts: rawMode ? [] : schemaAudit.schemaConflicts || [],
     richResultSummary: schemaAudit.richResultSummary || {},
-    schemaRecommendations: schemaAudit.schemaRecommendations || [],
+    schemaRecommendations: rawMode ? [] : schemaAudit.schemaRecommendations || [],
     schemaScoreBreakdown: schemaAudit.schemaScoreBreakdown || {},
     schemaPrice: schemaAudit.schemaPrice || '',
     visiblePriceSource,
@@ -1318,7 +1680,7 @@ function buildStructuredDataResult(
     selectedVariantPrice: schemaAudit.selectedVariantPrice || '',
     selectedVariantAvailability: schemaAudit.selectedVariantAvailability || '',
     consistencyWarnings: schemaAudit.consistencyWarnings || [],
-    visiblePrice: normalizePrice(visiblePrice) || '',
+    visiblePrice: schemaAudit.visiblePrice || normalizePrice(visiblePrice) || '',
     visiblePriceSource,
     totalDetectedItems:
       detectedItemCount > 0
@@ -1337,26 +1699,37 @@ function extractStructuredDataFromHtml(html, pageType, pageUrl = '') {
     .get();
   const parseResult = parseJsonLdScripts(scripts);
   const breadcrumbTrail = extractBreadcrumbTrailFromCheerio($, pageUrl);
+  const breadcrumbUiCandidates = extractBreadcrumbUiCandidates($, pageUrl);
   const microdataItems = extractMicrodataItems($);
   const visiblePriceResult = extractVisiblePriceResult($);
   const visiblePrice = visiblePriceResult.value;
+  const rawShopifyPriceCandidates = extractRawShopifyPriceCandidates($, html);
   const rawShopifyPrice = extractRawShopifyPrice($, html, visiblePrice);
   const selectedVariantId = extractSelectedVariantId($, html, pageUrl);
   const visibleAvailability = extractVisibleAvailability($, selectedVariantId);
+  const visibleAvailabilityCandidates = extractVisibleAvailabilityCandidates(
+    $,
+    selectedVariantId
+  );
   const visibleReviewData = extractVisibleReviewData($);
   const pageTitle = normalizeText($('h1').first().text() || $('title').text());
+  const productUrlCandidates = collectProductUrlCandidates($, pageUrl);
 
   return buildStructuredDataResult(
     effectivePageType,
     parseResult,
     'raw-html',
     pageUrl,
+    scripts,
     breadcrumbTrail,
     microdataItems,
-    visiblePrice,
-    visiblePriceResult.source,
+    visiblePriceResult,
     visibleAvailability,
     rawShopifyPrice,
+    rawShopifyPriceCandidates,
+    visibleAvailabilityCandidates,
+    breadcrumbUiCandidates,
+    productUrlCandidates,
     selectedVariantId,
     visibleReviewData,
     pageTitle
@@ -1455,6 +1828,7 @@ async function extractStructuredDataWithPuppeteer(url, pageType) {
     const rendered$ = cheerio.load(renderedHtml);
     const renderedMicrodataItems = extractMicrodataItems(rendered$);
     const breadcrumbTrail = extractBreadcrumbTrailFromCheerio(rendered$, url);
+    const breadcrumbUiCandidates = extractBreadcrumbUiCandidates(rendered$, url);
     const visiblePriceResult = extractVisiblePriceResult(rendered$);
     const selectedVariantId =
       extractSelectedVariantId(rendered$, renderedHtml, url) ||
@@ -1465,7 +1839,15 @@ async function extractStructuredDataWithPuppeteer(url, pageType) {
       renderedHtml,
       visiblePriceResult.value || renderedData.visiblePrice
     );
+    const rawShopifyPriceCandidates = extractRawShopifyPriceCandidates(
+      rendered$,
+      renderedHtml
+    );
     const visibleAvailability = extractVisibleAvailability(
+      rendered$,
+      selectedVariantId
+    );
+    const visibleAvailabilityCandidates = extractVisibleAvailabilityCandidates(
       rendered$,
       selectedVariantId
     );
@@ -1479,12 +1861,22 @@ async function extractStructuredDataWithPuppeteer(url, pageType) {
       parseResult,
       'puppeteer',
       url,
+      renderedData.scriptContents,
       breadcrumbTrail,
       renderedMicrodataItems,
-      visiblePriceResult.value || normalizePrice(renderedData.visiblePrice) || '',
-      visiblePriceResult.source,
+      visiblePriceResult.value
+        ? visiblePriceResult
+        : {
+            value: normalizePrice(renderedData.visiblePrice) || '',
+            source: 'rendered page probe',
+            candidates: []
+          },
       visibleAvailability,
       rawShopifyPrice,
+      rawShopifyPriceCandidates,
+      visibleAvailabilityCandidates,
+      breadcrumbUiCandidates,
+      collectProductUrlCandidates(rendered$, url),
       selectedVariantId,
       visibleReviewData,
       pageTitle

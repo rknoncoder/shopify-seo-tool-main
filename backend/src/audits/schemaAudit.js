@@ -1821,9 +1821,9 @@ function buildPriceUnitAnalysis({
   if (pricesAreEqual(rawNumber / 100, comparisonNumber)) {
     return {
       rawShopifyPrice,
-      priceUnitStatus: 'unit_mismatch',
+      priceUnitStatus: 'minor_unit',
       priceDebugNote:
-        `Raw Shopify/app price appears to use minor units (${rawShopifyPrice}) while schema/UI use major units (${comparisonNumber.toFixed(2)}). This is a unit-format difference, not necessarily a schema/UI mismatch.`
+        `Raw Shopify/app price appears to use minor units (${rawShopifyPrice}) while schema/UI use major units (${comparisonNumber.toFixed(2)}). This is raw-unit context, not a live/schema price mismatch.`
     };
   }
 
@@ -1833,6 +1833,41 @@ function buildPriceUnitAnalysis({
     priceDebugNote:
       `Raw Shopify/app price (${rawShopifyPrice}) does not clearly match schema/UI price (${comparisonNumber.toFixed(2)}) as either major units or Shopify minor units.`
   };
+}
+
+function normalizeVisiblePriceForRawShopifyUnits({
+  visiblePrice,
+  rawShopifyPrice,
+  schemaPrice,
+  allSchemaPrices = []
+}) {
+  const normalizedVisiblePrice = normalizePrice(visiblePrice) || '';
+  const visibleNumber = parsePriceNumber(normalizedVisiblePrice);
+  const rawNumber = parseRawShopifyPriceNumber(rawShopifyPrice);
+  const schemaNumbers = uniqueValues([schemaPrice, ...allSchemaPrices])
+    .map(parsePriceNumber)
+    .filter(value => value !== null);
+
+  if (
+    visibleNumber === null ||
+    rawNumber === null ||
+    schemaNumbers.length === 0
+  ) {
+    return normalizedVisiblePrice;
+  }
+
+  const visibleLooksLikeRaw =
+    pricesAreEqual(visibleNumber, rawNumber) ||
+    pricesAreEqual(visibleNumber, rawNumber / 100);
+  const rawMinorMatchesSchema = schemaNumbers.some(schemaNumber =>
+    pricesAreEqual(rawNumber / 100, schemaNumber)
+  );
+
+  if (visibleLooksLikeRaw && rawMinorMatchesSchema) {
+    return (rawNumber / 100).toFixed(2);
+  }
+
+  return normalizedVisiblePrice;
 }
 
 function buildSchemaUiConsistency({
@@ -1869,7 +1904,12 @@ function buildSchemaUiConsistency({
   const comparisonCandidate = selectedVariantCandidate || primaryCandidate;
   const schemaPrice = getSchemaPrice(comparisonCandidate) || '';
   const allSchemaPrices = getAllSchemaPrices(productCandidates);
-  const normalizedVisiblePrice = normalizePrice(visiblePrice) || '';
+  const normalizedVisiblePrice = normalizeVisiblePriceForRawShopifyUnits({
+    visiblePrice,
+    rawShopifyPrice,
+    schemaPrice,
+    allSchemaPrices
+  });
   const schemaAvailability = getSchemaAvailability(comparisonCandidate) || '';
   const allSchemaAvailabilities = getAllSchemaAvailabilities(productCandidates);
   const normalizedVisibleAvailability =
@@ -1940,11 +1980,11 @@ function buildSchemaUiConsistency({
     });
   }
 
-  if (priceUnitAnalysis.priceUnitStatus === 'unit_mismatch') {
+  if (priceUnitAnalysis.priceUnitStatus === 'minor_unit') {
     consistencyWarnings.push({
       priority: 'low',
-      type: 'raw_shopify_price_unit_mismatch',
-      issue: 'Raw Shopify/app price appears to use minor units',
+      type: 'raw_shopify_price_minor_unit',
+      issue: 'Shopify raw price uses minor units',
       whyItMatters:
         'Shopify app payloads often store prices in cents/minor units, while schema and UI should show customer-facing major units.',
       howToFix: priceUnitAnalysis.priceDebugNote

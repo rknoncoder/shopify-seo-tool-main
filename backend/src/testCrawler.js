@@ -2,14 +2,17 @@ const startCrawler = require('./index');
 const analyzeSEO = require('./analyzers/seoAnalyzer');
 const analyzeSitewideData = require('./analyzers/sitewideAnalyzer');
 const exportAuditToExcel = require('./exporters/excelExporter');
+const { getAuditMode } = require('./utils/auditMode');
 
 (async () => {
-  const crawlUrl = process.env.AUDIT_URL || 'https://www.nobero.com';
+  const auditMode = getAuditMode();
+  const crawlUrl = process.env.AUDIT_URL || 'https://row.gymshark.com/';
   const crawlResult = await startCrawler([], crawlUrl);
   const results = crawlResult.pages || [];
   const sitewideData = analyzeSitewideData(results);
   const analyzed = results.map(page => analyzeSEO(page, sitewideData));
   const report = {
+    auditMode,
     summary: {
       ...crawlResult.summary,
       ...sitewideData.summary
@@ -28,6 +31,8 @@ const exportAuditToExcel = require('./exporters/excelExporter');
 
   report.structuredDataSeoReport = analyzed.map(page => ({
     url: page.url,
+    auditMode: page.auditMode,
+    rawEvidence: page.rawEvidence,
     schema: page.structuredDataReport.schema,
     schemaAudit: page.structuredDataReport.schemaAudit,
     detectedSchemas: page.structuredDataReport.detectedSchemas,
