@@ -7,42 +7,12 @@ const {
 } = require('../audits/schemaAudit');
 const { detectShopifyPageType } = require('../utils/pageTypeDetector');
 const { buildMissingSchemas } = require('../utils/schemaRules');
-<<<<<<< HEAD
 const {
   hasAnySchemaType,
   normalizeSchemaType,
   normalizeSchemaTypes
 } = require('../utils/schemaTypes');
-=======
 const { isRawAuditMode } = require('../utils/auditMode');
-
-const SCHEMA_ALIASES = {
-  product: 'Product',
-  productgroup: 'ProductGroup',
-  breadcrumblist: 'BreadcrumbList',
-  itemlist: 'ItemList',
-  faqpage: 'FAQPage',
-  article: 'Article',
-  blogposting: 'BlogPosting',
-  organization: 'Organization',
-  website: 'WebSite',
-  webpage: 'WebPage',
-  collectionpage: 'CollectionPage',
-  searchresultspage: 'SearchResultsPage',
-  contactpoint: 'ContactPoint',
-  searchaction: 'SearchAction',
-  aggregaterating: 'AggregateRating',
-  aggregateoffer: 'AggregateOffer',
-  offer: 'Offer',
-  review: 'Review',
-  rating: 'Rating',
-  person: 'Person',
-  imageobject: 'ImageObject',
-  listitem: 'ListItem',
-  postaladdress: 'PostalAddress'
-};
-
->>>>>>> 787385ce4c59ed427a76713c854fb2161a221524
 
 const PRICE_CANDIDATE_SELECTORS = [
   { selector: 'select[name="id"] option[selected][data-price]', source: 'selected variant data-price', score: 180, allowPlainNumber: true },
@@ -469,7 +439,6 @@ function extractVisiblePriceResult($) {
     source: best
       ? `${best.source}: ${best.text.slice(0, 120)}`
       : 'not detected',
-<<<<<<< HEAD
     debugNote: buildIgnoredHiddenVariantPriceNote(
       ignoredHiddenVariantCandidates,
       best,
@@ -477,8 +446,7 @@ function extractVisiblePriceResult($) {
     ),
     supportingHiddenVariantPrices: Array.from(
       new Set(hiddenVariantCandidates.map(candidate => candidate.value).filter(Boolean))
-    )
-=======
+    ),
     candidates: sorted.map(candidate => ({
       value: candidate.value,
       label: candidate.source,
@@ -486,7 +454,6 @@ function extractVisiblePriceResult($) {
       context: candidate.text,
       isMrp: candidate.isMrp
     }))
->>>>>>> 787385ce4c59ed427a76713c854fb2161a221524
   };
 }
 
@@ -1474,6 +1441,7 @@ function buildRawSchemaEvidence({
     url: pageUrl,
     pageTypeGuess: pageType,
     schemaJsonLdRawBlocks: scripts,
+    parsedSchemaObjects: parseResult.parsedDocuments || [],
     parsedSchemaTypes: schemaTypes,
     schemaParseErrors: parseResult.errors || [],
     schemaProductNames: uniqueList(products.map(product => product.name)),
@@ -1660,14 +1628,7 @@ function buildStructuredDataResult(
   scripts = [],
   breadcrumbTrail = { present: false, links: [] },
   microdataItems = [],
-<<<<<<< HEAD
-  visiblePrice = '',
-  visiblePriceSource = '',
-  visiblePriceDebugNote = '',
-  supportingHiddenVariantPrices = [],
-=======
   visiblePriceResult = {},
->>>>>>> 787385ce4c59ed427a76713c854fb2161a221524
   visibleAvailability = '',
   rawShopifyPrice = '',
   rawShopifyPriceCandidates = [],
@@ -1680,6 +1641,9 @@ function buildStructuredDataResult(
 ) {
   const visiblePrice = visiblePriceResult.value || '';
   const visiblePriceSource = visiblePriceResult.source || '';
+  const visiblePriceDebugNote = visiblePriceResult.debugNote || '';
+  const supportingHiddenVariantPrices =
+    visiblePriceResult.supportingHiddenVariantPrices || [];
   const normalizedBreadcrumbTrail =
     typeof breadcrumbTrail === 'boolean'
       ? { present: breadcrumbTrail, links: [] }
@@ -1726,21 +1690,6 @@ function buildStructuredDataResult(
 
   const rawEvidence = buildRawSchemaEvidence({
     pageUrl,
-<<<<<<< HEAD
-    pageTitle,
-    jsonLdDocuments: parseResult.parsedDocuments,
-    microdataItems,
-    breadcrumbUiPresent,
-    breadcrumbLinks: normalizedBreadcrumbTrail.links || [],
-    jsonLdErrorCount: parseResult.errors.length,
-    schemaParseErrors: parseResult.errors,
-    visibleReviewData,
-    visiblePrice,
-    visiblePriceDebugNote,
-    visibleAvailability,
-    rawShopifyPrice,
-    selectedVariantId
-=======
     pageType,
     scripts,
     parseResult,
@@ -1750,7 +1699,6 @@ function buildStructuredDataResult(
     visibleAvailabilityCandidates,
     breadcrumbUiCandidates,
     productUrlCandidates
->>>>>>> 787385ce4c59ed427a76713c854fb2161a221524
   });
   const rawMode = isRawAuditMode();
   const schemaAudit = rawMode
@@ -1891,7 +1839,10 @@ function buildStructuredDataResult(
     schemaRecommendations: rawMode ? [] : schemaAudit.schemaRecommendations || [],
     schemaScoreBreakdown: schemaAudit.schemaScoreBreakdown || {},
     schemaPrice: schemaAudit.schemaPrice || '',
+    visiblePrice: schemaAudit.visiblePrice || normalizePrice(visiblePrice) || '',
     visiblePriceSource,
+    visiblePriceDebugNote,
+    supportingHiddenVariantPrices,
     rawShopifyPrice: schemaAudit.rawShopifyPrice || '',
     priceMatchStatus: schemaAudit.priceMatchStatus || '',
     priceUnitStatus: schemaAudit.priceUnitStatus || '',
@@ -1911,10 +1862,6 @@ function buildStructuredDataResult(
     selectedVariantPrice: schemaAudit.selectedVariantPrice || '',
     selectedVariantAvailability: schemaAudit.selectedVariantAvailability || '',
     consistencyWarnings: schemaAudit.consistencyWarnings || [],
-    visiblePrice: schemaAudit.visiblePrice || normalizePrice(visiblePrice) || '',
-    visiblePriceSource,
-    visiblePriceDebugNote,
-    supportingHiddenVariantPrices,
     totalDetectedItems:
       detectedItemCount > 0
         ? detectedItemCount
@@ -1956,14 +1903,7 @@ function extractStructuredDataFromHtml(html, pageType, pageUrl = '') {
     scripts,
     breadcrumbTrail,
     microdataItems,
-<<<<<<< HEAD
-    visiblePrice,
-    visiblePriceResult.source,
-    visiblePriceResult.debugNote,
-    visiblePriceResult.supportingHiddenVariantPrices,
-=======
     visiblePriceResult,
->>>>>>> 787385ce4c59ed427a76713c854fb2161a221524
     visibleAvailability,
     rawShopifyPrice,
     rawShopifyPriceCandidates,
@@ -2104,12 +2044,6 @@ async function extractStructuredDataWithPuppeteer(url, pageType) {
       renderedData.scriptContents,
       breadcrumbTrail,
       renderedMicrodataItems,
-<<<<<<< HEAD
-      visiblePriceResult.value || normalizePrice(renderedData.visiblePrice) || '',
-      visiblePriceResult.source,
-      visiblePriceResult.debugNote,
-      visiblePriceResult.supportingHiddenVariantPrices,
-=======
       visiblePriceResult.value
         ? visiblePriceResult
         : {
@@ -2117,7 +2051,6 @@ async function extractStructuredDataWithPuppeteer(url, pageType) {
             source: 'rendered page probe',
             candidates: []
           },
->>>>>>> 787385ce4c59ed427a76713c854fb2161a221524
       visibleAvailability,
       rawShopifyPrice,
       rawShopifyPriceCandidates,

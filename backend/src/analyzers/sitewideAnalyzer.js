@@ -1,9 +1,6 @@
 const { buildCoverageMap } = require('../utils/schemaRules');
-<<<<<<< HEAD
 const { normalizeSchemaTypes } = require('../utils/schemaTypes');
-=======
 const { isRawAuditMode } = require('../utils/auditMode');
->>>>>>> 787385ce4c59ed427a76713c854fb2161a221524
 
 function normalizeField(value) {
   return (value || '').replace(/\s+/g, ' ').trim().toLowerCase();

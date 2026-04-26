@@ -1,12 +1,12 @@
 const startCrawler = require('./index');
 const analyzeSEO = require('./analyzers/seoAnalyzer');
 const analyzeSitewideData = require('./analyzers/sitewideAnalyzer');
-const exportAuditToExcel = require('./exporters/excelExporter');
+const exportAuditArtifacts = require('./exporters/reportExporter');
 const { getAuditMode } = require('./utils/auditMode');
 
 (async () => {
   const auditMode = getAuditMode();
-  const crawlUrl = process.env.AUDIT_URL || 'https://row.gymshark.com/';
+  const crawlUrl = process.env.AUDIT_URL || 'https://nobero.com';
   const crawlResult = await startCrawler([], crawlUrl);
   const results = crawlResult.pages || [];
   const sitewideData = analyzeSitewideData(results);
@@ -77,9 +77,30 @@ const { getAuditMode } = require('./utils/auditMode');
     recommendations: page.structuredDataReport.recommendations
   }));
 
-  const excelPath = exportAuditToExcel(report);
+  const artifacts = exportAuditArtifacts(report);
 
   console.log('\nSEO AUDIT RESULTS:\n');
-  console.log(`Excel report saved to: ${excelPath}`);
-  console.log(JSON.stringify(report, null, 2));
+  console.log(`Excel summary saved to: ${artifacts.excelSummaryPath}`);
+  console.log(`Raw evidence (${artifacts.rawEvidenceFormat}) saved to: ${artifacts.rawEvidencePath}`);
+  if (artifacts.rawSchemaByTypePath) {
+    console.log(`Raw schema by type report saved to: ${artifacts.rawSchemaByTypePath}`);
+  }
+  if (Object.keys(artifacts.rawEvidencePageTypeFiles || {}).length > 0) {
+    console.log('Page-type raw evidence files:');
+    Object.entries(artifacts.rawEvidencePageTypeFiles).forEach(
+      ([pageType, filePath]) => {
+        console.log(`- ${pageType}: ${filePath}`);
+      }
+    );
+  }
+  console.log(
+    JSON.stringify(
+      {
+        auditMode,
+        summary: report.summary
+      },
+      null,
+      2
+    )
+  );
 })();
