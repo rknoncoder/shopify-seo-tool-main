@@ -1,6 +1,10 @@
 const fs = require('fs');
 const path = require('path');
+<<<<<<< HEAD
 const { normalizeSchemaTypes } = require('../utils/schemaTypes');
+=======
+const { getAuditMode } = require('../utils/auditMode');
+>>>>>>> 787385ce4c59ed427a76713c854fb2161a221524
 
 function escapeXml(value) {
   return String(value ?? '')
@@ -128,6 +132,103 @@ function formatProductFieldValidation(validation = {}) {
     .join(' | ');
 }
 
+function formatEvidenceValue(value) {
+  if (Array.isArray(value)) {
+    return value
+      .map(item =>
+        item && typeof item === 'object' ? JSON.stringify(item) : String(item)
+      )
+      .join('\n');
+  }
+
+  if (value && typeof value === 'object') {
+    return JSON.stringify(value, null, 2);
+  }
+
+  return value || '';
+}
+
+function getRawEvidence(page) {
+  return page.rawEvidence || page.structuredDataReport?.rawEvidence || page.structuredData?.rawEvidence || {};
+}
+
+function buildRawEvidenceRows(pages) {
+  const rows = [[
+    'URL',
+    'Page Type Guess',
+    'Title',
+    'Meta Description',
+    'H1',
+    'Canonical',
+    'Noindex',
+    'Has Product Schema',
+    'Has Offer Schema',
+    'Has Breadcrumb Schema',
+    'Has CollectionPage Schema',
+    'Has Parse Errors',
+    'Parsed Schema Types',
+    'Schema JSON-LD Raw Blocks',
+    'Schema Parse Errors',
+    'Schema Product Names',
+    'Schema Product URLs',
+    'Schema Offer Prices',
+    'Schema Offer Currencies',
+    'Schema Offer Availability',
+    'Schema Offer URLs',
+    'Schema Brands',
+    'Visible Price Candidates',
+    'Raw Shopify Price Candidates',
+    'Visible Availability Candidates',
+    'Breadcrumb UI Candidates',
+    'Breadcrumb Schema Items',
+    'Product URL Candidates',
+    'Duplicate URL Candidates'
+  ]];
+
+  pages.forEach(page => {
+    const evidence = getRawEvidence(page);
+    const duplicateCandidates = [
+      ...(evidence.duplicateUrlCandidates || []),
+      ...(page.collectionProductDuplicateUrls || []),
+      ...(page.collectionProductUrls || [])
+    ].filter((url, index, all) => url && all.indexOf(url) === index);
+
+    rows.push([
+      evidence.url || page.url || '',
+      evidence.pageTypeGuess || page.pageType || '',
+      page.title || '',
+      page.metaDescription || '',
+      page.h1 || '',
+      page.canonical || '',
+      page.isNoindex ? 'Yes' : 'No',
+      evidence.hasProductSchema ? 'Yes' : 'No',
+      evidence.hasOfferSchema ? 'Yes' : 'No',
+      evidence.hasBreadcrumbSchema ? 'Yes' : 'No',
+      evidence.hasCollectionPageSchema ? 'Yes' : 'No',
+      evidence.hasParseErrors ? 'Yes' : 'No',
+      formatEvidenceValue(evidence.parsedSchemaTypes || []),
+      formatEvidenceValue(evidence.schemaJsonLdRawBlocks || []),
+      formatEvidenceValue(evidence.schemaParseErrors || []),
+      formatEvidenceValue(evidence.schemaProductNames || []),
+      formatEvidenceValue(evidence.schemaProductUrls || []),
+      formatEvidenceValue(evidence.schemaOfferPrices || []),
+      formatEvidenceValue(evidence.schemaOfferCurrencies || []),
+      formatEvidenceValue(evidence.schemaOfferAvailability || []),
+      formatEvidenceValue(evidence.schemaOfferUrls || []),
+      formatEvidenceValue(evidence.schemaBrands || []),
+      formatEvidenceValue(evidence.visiblePriceCandidates || []),
+      formatEvidenceValue(evidence.rawShopifyPriceCandidates || []),
+      formatEvidenceValue(evidence.visibleAvailabilityCandidates || []),
+      formatEvidenceValue(evidence.breadcrumbUiCandidates || []),
+      formatEvidenceValue(evidence.breadcrumbSchemaItems || []),
+      formatEvidenceValue(evidence.productUrlCandidates || []),
+      formatEvidenceValue(duplicateCandidates)
+    ]);
+  });
+
+  return rows;
+}
+
 function buildPageRows(pages) {
   const rows = [[
     'URL',
@@ -151,11 +252,11 @@ function buildPageRows(pages) {
     'Rich Result Summary',
     'Schema Score',
     'Schema Price',
-    'Visible Price',
+    'Live/UI Price',
     'Visible Price Source',
-    'Raw Shopify Price',
+    'Shopify Raw Price',
     'Price Match Status',
-    'Price Unit Status',
+    'Shopify Raw Price Unit',
     'Price Debug Note',
     'Schema Availability',
     'Visible Availability',
@@ -322,14 +423,30 @@ function buildPageRows(pages) {
 }
 
 function buildWorkbookXml(report) {
-  const rows = [
+  const auditMode = report.auditMode || getAuditMode();
+  const summaryRows = [
     ...buildSummaryRows(report.summary || {}),
-    ['', ''],
-    ['Page Audit Details', ''],
-    ...buildPageRows(report.pages || [])
+    ['Audit Mode', auditMode]
   ];
-
-  const worksheet = createWorksheet('SEO Audit', rows);
+  const worksheets =
+    auditMode === 'raw'
+      ? [
+          createWorksheet('Raw Evidence', [
+            ...summaryRows,
+            ['', ''],
+            ['Raw Evidence Details', ''],
+            ...buildRawEvidenceRows(report.pages || [])
+          ])
+        ]
+      : [
+          createWorksheet('SEO Audit', [
+            ...summaryRows,
+            ['', ''],
+            ['Page Audit Details', ''],
+            ...buildPageRows(report.pages || [])
+          ]),
+          createWorksheet('Raw Evidence', buildRawEvidenceRows(report.pages || []))
+        ];
 
   return `<?xml version="1.0"?>
 <?mso-application progid="Excel.Sheet"?>
@@ -339,7 +456,7 @@ function buildWorkbookXml(report) {
   xmlns:x="urn:schemas-microsoft-com:office:excel"
   xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"
   xmlns:html="http://www.w3.org/TR/REC-html40">
-  ${worksheet}
+  ${worksheets.join('')}
 </Workbook>`;
 }
 

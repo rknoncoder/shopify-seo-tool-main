@@ -1,4 +1,5 @@
 const { parseIssues } = require('../utils/issueParser');
+const { isRawAuditMode } = require('../utils/auditMode');
 
 function analyzeSEO(page, sitewideData = {}) {
   const rawIssues = [];
@@ -104,6 +105,8 @@ function analyzeSEO(page, sitewideData = {}) {
 
   return {
     ...page,
+    auditMode: structuredDataReport.auditMode,
+    rawEvidence: structuredDataReport.rawEvidence,
     schema: structuredDataReport.schema,
     schemaAudit: structuredDataReport.schemaAudit,
     generatedSchemaSample: structuredDataReport.generatedSchemaSample,
@@ -204,6 +207,7 @@ function buildSchemaSummary(page) {
 
 function buildStructuredDataReport(page, findings) {
   const structuredData = page.structuredData || {};
+  const rawMode = isRawAuditMode();
   const missing = [];
   const recommendations = [];
   const schema = buildSchemaSummary(page);
@@ -220,23 +224,23 @@ function buildStructuredDataReport(page, findings) {
     }
   });
 
-  if (!structuredData.hasStructuredData) {
+  if (!rawMode && !structuredData.hasStructuredData) {
     recommendations.push(
       'Add valid JSON-LD markup for the primary page type and key business entities.'
     );
   }
 
-  (structuredData.recommendations || []).forEach(recommendation => {
+  if (!rawMode) (structuredData.recommendations || []).forEach(recommendation => {
     recommendations.push(recommendation);
   });
 
-  (schemaAudit.rows || []).forEach(row => {
+  if (!rawMode) (schemaAudit.rows || []).forEach(row => {
     if (row.status === 'Warning' || row.status === 'Error') {
       recommendations.push(row.recommendation);
     }
   });
 
-  (structuredData.schemaRecommendations || []).forEach(recommendation => {
+  if (!rawMode) (structuredData.schemaRecommendations || []).forEach(recommendation => {
     const text = [
       recommendation.priority ? `[${recommendation.priority}]` : '',
       recommendation.issue,
@@ -252,6 +256,8 @@ function buildStructuredDataReport(page, findings) {
 
   return {
     schema,
+    auditMode: structuredData.auditMode || (rawMode ? 'raw' : 'evaluated'),
+    rawEvidence: structuredData.rawEvidence || {},
     schemaAudit,
     generatedSchemaSample: structuredData.generatedSchemaSample || '',
     generatedSchemaSamples: structuredData.generatedSchemaSamples || {},
@@ -296,7 +302,7 @@ function buildStructuredDataReport(page, findings) {
     confidence: schema.confidence,
     issues: structuredData.issues || [],
     missingStructuredData: missing,
-    recommendations: Array.from(new Set(recommendations))
+    recommendations: rawMode ? [] : Array.from(new Set(recommendations))
   };
 }
 
