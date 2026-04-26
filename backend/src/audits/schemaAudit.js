@@ -2,13 +2,10 @@ const {
   getMissingSchemaGroups,
   listExpectedSchemaTypes
 } = require('../utils/schemaRules');
-
-function normalizeSchemaType(type) {
-  return String(type || '')
-    .trim()
-    .replace(/^https?:\/\/schema\.org\//i, '')
-    .replace(/^schema:/i, '');
-}
+const {
+  normalizeSchemaType,
+  normalizeSchemaTypes
+} = require('../utils/schemaTypes');
 
 function getNormalizedTypeList(value) {
   const rawTypes = Array.isArray(value?.['@type'])
@@ -17,7 +14,7 @@ function getNormalizedTypeList(value) {
       ? [value['@type']]
       : [];
 
-  return rawTypes.map(normalizeSchemaType).filter(Boolean);
+  return normalizeSchemaTypes(rawTypes);
 }
 
 function collectEntitiesByTypes(
@@ -1839,6 +1836,7 @@ function buildSchemaUiConsistency({
   pageType,
   productCandidates,
   visiblePrice,
+  visiblePriceDebugNote = '',
   visibleAvailability,
   rawShopifyPrice,
   selectedVariantId = ''
@@ -1850,7 +1848,7 @@ function buildSchemaUiConsistency({
       rawShopifyPrice: rawShopifyPrice || '',
       priceMatchStatus: 'not_applicable',
       priceUnitStatus: 'unknown',
-      priceDebugNote: '',
+      priceDebugNote: visiblePriceDebugNote || '',
       schemaAvailability: '',
       visibleAvailability: normalizeAvailability(visibleAvailability) || '',
       availabilityMatchStatus: 'not_applicable',
@@ -1895,6 +1893,12 @@ function buildSchemaUiConsistency({
     rawShopifyPrice,
     priceMatchStatus
   });
+  const priceDebugNote = [
+    priceUnitAnalysis.priceDebugNote,
+    visiblePriceDebugNote
+  ]
+    .filter(Boolean)
+    .join(' ');
   const availabilityMatchStatus = getMatchStatus({
     primaryValue: schemaAvailability,
     allValues: allSchemaAvailabilities,
@@ -1996,7 +2000,7 @@ function buildSchemaUiConsistency({
     rawShopifyPrice: priceUnitAnalysis.rawShopifyPrice,
     priceMatchStatus,
     priceUnitStatus: priceUnitAnalysis.priceUnitStatus,
-    priceDebugNote: priceUnitAnalysis.priceDebugNote,
+    priceDebugNote,
     schemaAvailability,
     visibleAvailability: normalizedVisibleAvailability,
     availabilityMatchStatus,
@@ -2767,6 +2771,7 @@ function buildSchemaAudit({
   schemaParseErrors = [],
   visibleReviewData = {},
   visiblePrice = '',
+  visiblePriceDebugNote = '',
   visibleAvailability = '',
   rawShopifyPrice = '',
   selectedVariantId = ''
@@ -2817,6 +2822,7 @@ function buildSchemaAudit({
     pageType,
     productCandidates: dedupedProductCandidates,
     visiblePrice,
+    visiblePriceDebugNote,
     visibleAvailability,
     rawShopifyPrice,
     selectedVariantId

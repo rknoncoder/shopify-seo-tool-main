@@ -7,33 +7,11 @@ const {
 } = require('../audits/schemaAudit');
 const { detectShopifyPageType } = require('../utils/pageTypeDetector');
 const { buildMissingSchemas } = require('../utils/schemaRules');
-
-const SCHEMA_ALIASES = {
-  product: 'Product',
-  productgroup: 'ProductGroup',
-  breadcrumblist: 'BreadcrumbList',
-  itemlist: 'ItemList',
-  faqpage: 'FAQPage',
-  article: 'Article',
-  blogposting: 'BlogPosting',
-  organization: 'Organization',
-  website: 'WebSite',
-  webpage: 'WebPage',
-  collectionpage: 'CollectionPage',
-  searchresultspage: 'SearchResultsPage',
-  contactpoint: 'ContactPoint',
-  searchaction: 'SearchAction',
-  aggregaterating: 'AggregateRating',
-  aggregateoffer: 'AggregateOffer',
-  offer: 'Offer',
-  review: 'Review',
-  rating: 'Rating',
-  person: 'Person',
-  imageobject: 'ImageObject',
-  listitem: 'ListItem',
-  postaladdress: 'PostalAddress'
-};
-
+const {
+  hasAnySchemaType,
+  normalizeSchemaType,
+  normalizeSchemaTypes
+} = require('../utils/schemaTypes');
 
 const PRICE_CANDIDATE_SELECTORS = [
   { selector: 'select[name="id"] option[selected][data-price]', source: 'selected variant data-price', score: 180, allowPlainNumber: true },
@@ -191,6 +169,74 @@ function hasMrpContext(text, element) {
   return /(mrp|compare|compare-at|was-price|old-price|strike|strikethrough|line-through)/i.test(`${text} ${classSource}`);
 }
 
+function getNodeDescriptor($, element) {
+  if (!element) {
+    return '';
+  }
+
+  const node = $(element);
+  return normalizeText(
+    [
+      element.name,
+      node.attr('class'),
+      node.attr('id'),
+      node.attr('data-testid'),
+      node.attr('name'),
+      node.parent().attr('class'),
+      node.parent().attr('id'),
+      node.closest('[class*="stl-" i], [class*="bundle" i], [class*="combo" i], [class*="look" i], [data-testid*="bundle" i], [data-testid*="combo" i], [data-testid*="look" i]').attr('class'),
+      node.closest('form[action*="/cart/add"], [class*="product" i], [class*="price" i], [class*="cart" i], [class*="offer" i], [class*="buy" i]').attr('class')
+    ].join(' ')
+  );
+}
+
+function isHiddenVariantPriceElement($, element) {
+  if (!element) {
+    return false;
+  }
+
+  const node = $(element);
+  const descriptor = getNodeDescriptor($, element);
+  const hasVariantPriceAttribute =
+    node.attr('data-price') !== undefined ||
+    node.attr('data-variant-price') !== undefined ||
+    node.attr('data-product-price') !== undefined;
+
+  return (
+    node.is('option') ||
+    node.is('select') ||
+    (
+      hasVariantPriceAttribute &&
+      (
+        node.closest('select[name="id"], .stl-option-select, [data-variant-json]').length > 0 ||
+        /(stl-option-select|selected variant)/i.test(descriptor)
+      )
+    )
+  );
+}
+
+function isLookBundleProductPage($) {
+  const pageDescriptor = normalizeText(
+    [
+      $('body').attr('class'),
+      $('h1').first().text(),
+      $('[class*="stl-product-section" i], [class*="combo" i], [class*="bundle" i], [class*="complete-look" i], [class*="full-look" i], [data-testid*="bundle" i], [data-testid*="combo" i], [data-testid*="look" i]')
+        .slice(0, 8)
+        .map((_, element) =>
+          [
+            $(element).attr('class'),
+            $(element).attr('id'),
+            $(element).attr('data-testid')
+          ].join(' ')
+        )
+        .get()
+        .join(' ')
+    ].join(' ')
+  );
+
+  return /(stl-product-section|shop\s+the\s+look|complete\s+the\s+look|full\s+look|\blook\b|bundle|combo)/i.test(pageDescriptor);
+}
+
 function getElementContext($, element) {
   const node = $(element);
   const ownText = normalizeText(
@@ -208,6 +254,7 @@ function getElementContext($, element) {
       node.attr('name'),
       node.parent().attr('class'),
       node.parent().attr('id'),
+      node.closest('[class*="stl-" i], [class*="bundle" i], [class*="combo" i], [class*="look" i], [data-testid*="bundle" i], [data-testid*="combo" i], [data-testid*="look" i]').attr('class'),
       node.closest('form[action*="/cart/add"], [class*="product" i], [class*="price" i], [class*="cart" i], [class*="offer" i], [class*="buy" i]').attr('class'),
       node.closest('form[action*="/cart/add"]').attr('action')
     ].join(' ')
@@ -226,6 +273,7 @@ function scorePriceCandidate({ $, element, selectorConfig, token, candidateText 
     : { ownText: candidateText, classSource: '', combined: candidateText };
   const directText = context.ownText || candidateText;
   const combinedContext = `${directText} ${context.classSource}`;
+  const isHiddenVariantPrice = isHiddenVariantPriceElement($, element);
 
   if (hasRejectedMerchandisingContext($, element, combinedContext)) {
     return null;
@@ -268,18 +316,39 @@ function scorePriceCandidate({ $, element, selectorConfig, token, candidateText 
   if (/(offer|coupon|promo|banner|discount)/i.test(context.classSource)) {
     score -= 45;
   }
+  if (isHiddenVariantPrice) {
+    score -= 120;
+  }
 
   return {
     value: token.value,
     score,
     source: selectorConfig?.source || 'body currency fallback',
     text: directText || token.raw,
-    isMrp
+    isMrp,
+    isHiddenVariantPrice
   };
+}
+
+function buildIgnoredHiddenVariantPriceNote(hiddenCandidates = [], selectedCandidate, isLookBundlePage) {
+  if (!selectedCandidate || hiddenCandidates.length === 0) {
+    return '';
+  }
+
+  const hiddenValues = Array.from(
+    new Set(hiddenCandidates.map(candidate => candidate.value).filter(Boolean))
+  );
+  if (hiddenValues.length === 0) {
+    return '';
+  }
+
+  const context = isLookBundlePage ? ' on look/combo/bundle-style page' : '';
+  return `Ignored hidden variant data-price value(s) ${hiddenValues.join(', ')}${context}; selected visible page-level selling price ${selectedCandidate.value}.`;
 }
 
 function extractVisiblePriceResult($) {
   const candidates = [];
+  const lookBundlePage = isLookBundleProductPage($);
 
   PRICE_CANDIDATE_SELECTORS.forEach(selectorConfig => {
     $(selectorConfig.selector).each((_, element) => {
@@ -344,15 +413,39 @@ function extractVisiblePriceResult($) {
   }
 
   const primaryCandidates = candidates.filter(candidate => !candidate.isMrp);
-  const sorted = (primaryCandidates.length > 0 ? primaryCandidates : candidates)
+  const visiblePrimaryCandidates = primaryCandidates.filter(
+    candidate => !candidate.isHiddenVariantPrice
+  );
+  const hiddenVariantCandidates = primaryCandidates.filter(
+    candidate => candidate.isHiddenVariantPrice
+  );
+  const candidatePool =
+    visiblePrimaryCandidates.length > 0
+      ? visiblePrimaryCandidates
+      : primaryCandidates.length > 0
+        ? primaryCandidates
+        : candidates;
+  const sorted = candidatePool
     .sort((left, right) => right.score - left.score);
   const best = sorted[0];
+  const ignoredHiddenVariantCandidates =
+    best && visiblePrimaryCandidates.length > 0
+      ? hiddenVariantCandidates
+      : [];
 
   return {
     value: best?.value || '',
     source: best
       ? `${best.source}: ${best.text.slice(0, 120)}`
-      : 'not detected'
+      : 'not detected',
+    debugNote: buildIgnoredHiddenVariantPriceNote(
+      ignoredHiddenVariantCandidates,
+      best,
+      lookBundlePage
+    ),
+    supportingHiddenVariantPrices: Array.from(
+      new Set(hiddenVariantCandidates.map(candidate => candidate.value).filter(Boolean))
+    )
   };
 }
 
@@ -856,12 +949,84 @@ function hasBreadcrumbTrailText(text) {
   return /(home\s*(>|\/|\u203a|\u00bb|\u2192|&rsaquo;).+\s*(>|\/|\u203a|\u00bb|\u2192|&rsaquo;).+)/i.test(normalized);
 }
 
-function hasBreadcrumbEvidence(links = [], text = '') {
-  if ((links || []).length >= 2) {
+function normalizeBreadcrumbComparableText(value) {
+  return normalizeText(value)
+    .replace(/[-_]+/g, ' ')
+    .replace(/[^a-z0-9\s]/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function getCurrentPageBreadcrumbLabel(pageUrl = '') {
+  try {
+    const parsedUrl = new URL(pageUrl);
+    const segments = parsedUrl.pathname.split('/').filter(Boolean);
+    return normalizeBreadcrumbComparableText(
+      toBreadcrumbLabel(segments[segments.length - 1] || '')
+    );
+  } catch (error) {
+    return '';
+  }
+}
+
+function isIgnoredBreadcrumbContainer($, element) {
+  const node = $(element);
+  const descriptor = normalizeText(
+    [
+      element?.name,
+      node.attr('class'),
+      node.attr('id'),
+      node.attr('role'),
+      node.attr('aria-label'),
+      node.attr('data-testid')
+    ].join(' ')
+  );
+
+  return (
+    node.closest('header, footer, aside').length > 0 ||
+    /(header|footer|site-nav|main-menu|mega-menu|drawer|mobile-menu|pagination|product-tab|tabs?|tablist|social|newsletter)/i.test(descriptor)
+  );
+}
+
+function isPageRelevantBreadcrumbText(text = '', pageUrl = '') {
+  const currentLabel = getCurrentPageBreadcrumbLabel(pageUrl);
+  if (!currentLabel) {
     return true;
   }
 
-  return hasBreadcrumbTrailText(text);
+  return normalizeBreadcrumbComparableText(text).includes(currentLabel);
+}
+
+function hasBreadcrumbEvidence({
+  links = [],
+  text = '',
+  explicit = false,
+  pageUrl = '',
+  $ = null,
+  element = null
+}) {
+  const normalizedLinks = links || [];
+  const normalizedText = normalizeText(text);
+  const startsWithHome =
+    normalizedLinks.length > 0 &&
+    /^home$/i.test(String(normalizedLinks[0].name || '').trim());
+
+  if (!explicit && $ && element && isIgnoredBreadcrumbContainer($, element)) {
+    return false;
+  }
+
+  if (explicit) {
+    return (
+      (normalizedLinks.length >= 2 && (startsWithHome || hasBreadcrumbTrailText(normalizedText))) ||
+      hasBreadcrumbTrailText(normalizedText)
+    );
+  }
+
+  return (
+    hasBreadcrumbTrailText(normalizedText) &&
+    isPageRelevantBreadcrumbText(normalizedText, pageUrl)
+  );
 }
 
 function extractBreadcrumbLinksFromElement($, element, pageUrl = '') {
@@ -904,7 +1069,14 @@ function extractBreadcrumbTrailFromCheerio($, pageUrl = '') {
     const links = extractBreadcrumbLinksFromElement($, element, pageUrl);
     const text = $(element).text();
 
-    if (hasBreadcrumbEvidence(links, text)) {
+    if (hasBreadcrumbEvidence({
+      links,
+      text,
+      explicit: true,
+      pageUrl,
+      $,
+      element
+    })) {
       return {
         present: true,
         links
@@ -915,7 +1087,14 @@ function extractBreadcrumbTrailFromCheerio($, pageUrl = '') {
   const explicitTrailText = explicitElements
     .map(element => $(element).text())
     .join(' ');
-  if (explicitElements.length > 0 && hasBreadcrumbTrailText(explicitTrailText)) {
+  if (
+    explicitElements.length > 0 &&
+    hasBreadcrumbEvidence({
+      text: explicitTrailText,
+      explicit: true,
+      pageUrl
+    })
+  ) {
     return {
       present: true,
       links: []
@@ -927,14 +1106,21 @@ function extractBreadcrumbTrailFromCheerio($, pageUrl = '') {
     links: []
   };
 
-  $('nav, ol, ul, div').each((_, el) => {
-    const links = $(el).find('a');
+  $('main nav, main ol, main ul, main div, [role="main"] nav, [role="main"] ol, [role="main"] ul, [role="main"] div').each((_, el) => {
+    const links = extractBreadcrumbLinksFromElement($, el, pageUrl);
     const text = $(el).text();
 
-    if (hasBreadcrumbEvidence(extractBreadcrumbLinksFromElement($, el, pageUrl), text)) {
+    if (hasBreadcrumbEvidence({
+      links,
+      text,
+      explicit: false,
+      pageUrl,
+      $,
+      element: el
+    })) {
       trail = {
         present: true,
-        links: extractBreadcrumbLinksFromElement($, el, pageUrl)
+        links
       };
       return false;
     }
@@ -956,17 +1142,6 @@ function resolveSchemaPageType(url, pageType, html = '', $ = null) {
     $,
     fallback: pageType
   });
-}
-
-function normalizeSchemaType(type) {
-  const rawValue = String(type || '').trim();
-  const normalized = rawValue.toLowerCase();
-
-  if (SCHEMA_ALIASES[normalized]) {
-    return SCHEMA_ALIASES[normalized];
-  }
-
-  return rawValue;
 }
 
 function collectSchemaTypes(value, detected = new Set(), seen = new WeakSet()) {
@@ -1148,6 +1323,8 @@ function buildStructuredDataResult(
   microdataItems = [],
   visiblePrice = '',
   visiblePriceSource = '',
+  visiblePriceDebugNote = '',
+  supportingHiddenVariantPrices = [],
   visibleAvailability = '',
   rawShopifyPrice = '',
   selectedVariantId = '',
@@ -1159,13 +1336,13 @@ function buildStructuredDataResult(
       ? { present: breadcrumbTrail, links: [] }
       : breadcrumbTrail || { present: false, links: [] };
   const breadcrumbUiPresent = Boolean(normalizedBreadcrumbTrail.present);
-  const microdataTypes = microdataItems
-    .flatMap(item => item.types || [])
-    .filter((type, index, all) => type && all.indexOf(type) === index)
-    .sort();
-  const combinedDetectedSchemas = Array.from(
-    new Set([...(parseResult.detectedSchemas || []), ...microdataTypes])
+  const microdataTypes = normalizeSchemaTypes(
+    microdataItems.flatMap(item => item.types || [])
   ).sort();
+  const combinedDetectedSchemas = normalizeSchemaTypes([
+    ...(parseResult.detectedSchemas || []),
+    ...microdataTypes
+  ]).sort();
   const missingSchemas = buildMissingSchemas(
     pageType,
     combinedDetectedSchemas,
@@ -1211,6 +1388,7 @@ function buildStructuredDataResult(
     schemaParseErrors: parseResult.errors,
     visibleReviewData,
     visiblePrice,
+    visiblePriceDebugNote,
     visibleAvailability,
     rawShopifyPrice,
     selectedVariantId
@@ -1320,6 +1498,8 @@ function buildStructuredDataResult(
     consistencyWarnings: schemaAudit.consistencyWarnings || [],
     visiblePrice: normalizePrice(visiblePrice) || '',
     visiblePriceSource,
+    visiblePriceDebugNote,
+    supportingHiddenVariantPrices,
     totalDetectedItems:
       detectedItemCount > 0
         ? detectedItemCount
@@ -1355,6 +1535,8 @@ function extractStructuredDataFromHtml(html, pageType, pageUrl = '') {
     microdataItems,
     visiblePrice,
     visiblePriceResult.source,
+    visiblePriceResult.debugNote,
+    visiblePriceResult.supportingHiddenVariantPrices,
     visibleAvailability,
     rawShopifyPrice,
     selectedVariantId,
@@ -1483,6 +1665,8 @@ async function extractStructuredDataWithPuppeteer(url, pageType) {
       renderedMicrodataItems,
       visiblePriceResult.value || normalizePrice(renderedData.visiblePrice) || '',
       visiblePriceResult.source,
+      visiblePriceResult.debugNote,
+      visiblePriceResult.supportingHiddenVariantPrices,
       visibleAvailability,
       rawShopifyPrice,
       selectedVariantId,
@@ -1500,6 +1684,128 @@ async function extractStructuredDataWithPuppeteer(url, pageType) {
   }
 }
 
+function hasExpectedSchemaForPageType(pageType, schemaTypes = []) {
+  if (pageType === 'product') {
+    return (
+      hasAnySchemaType(schemaTypes, ['Product', 'ProductGroup']) &&
+      hasAnySchemaType(schemaTypes, ['Offer', 'AggregateOffer'])
+    );
+  }
+
+  if (pageType === 'collection') {
+    return (
+      hasAnySchemaType(schemaTypes, ['CollectionPage', 'WebPage']) &&
+      hasAnySchemaType(schemaTypes, ['BreadcrumbList'])
+    );
+  }
+
+  if (pageType === 'blog') {
+    return hasAnySchemaType(schemaTypes, ['Article', 'BlogPosting']);
+  }
+
+  if (pageType === 'homepage') {
+    return (
+      hasAnySchemaType(schemaTypes, ['Organization']) &&
+      hasAnySchemaType(schemaTypes, ['WebSite'])
+    );
+  }
+
+  if (pageType === 'search') {
+    return hasAnySchemaType(schemaTypes, ['SearchResultsPage', 'WebPage']);
+  }
+
+  return hasAnySchemaType(schemaTypes, ['WebPage']);
+}
+
+function shouldRunRenderedSchemaExtraction(rawResult, pageType) {
+  if (!rawResult?.hasStructuredData) {
+    return true;
+  }
+
+  if ((rawResult.jsonLdErrors || []).length > 0) {
+    return true;
+  }
+
+  return !hasExpectedSchemaForPageType(
+    pageType,
+    rawResult.detectedSchemaTypes || rawResult.schemaTypes || []
+  );
+}
+
+function mergeErrorLists(...errorLists) {
+  return Array.from(
+    new Map(
+      errorLists
+        .flat()
+        .filter(Boolean)
+        .map(error => [
+          [error.message, error.line, error.column, error.snippet].join('|'),
+          error
+        ])
+    ).values()
+  );
+}
+
+function mergeStructuredDataResults(rawResult, renderedResult) {
+  const schemaTypes = normalizeSchemaTypes([
+    ...(rawResult.schemaTypes || rawResult.detectedSchemas || []),
+    ...(renderedResult.schemaTypes || renderedResult.detectedSchemas || [])
+  ]).sort();
+  const detectedSchemaTypes = normalizeSchemaTypes([
+    ...(rawResult.detectedSchemaTypes || []),
+    ...(renderedResult.detectedSchemaTypes || []),
+    ...schemaTypes
+  ]).sort();
+  const jsonLdErrors = mergeErrorLists(
+    rawResult.jsonLdErrors || [],
+    renderedResult.jsonLdErrors || []
+  );
+  const schemaParseErrors = mergeErrorLists(
+    rawResult.schemaParseErrors || [],
+    renderedResult.schemaParseErrors || []
+  );
+
+  return {
+    ...renderedResult,
+    source:
+      rawResult.source && renderedResult.source && rawResult.source !== renderedResult.source
+        ? `${rawResult.source}+${renderedResult.source}`
+        : renderedResult.source || rawResult.source,
+    detectedSchemas: schemaTypes,
+    schemaTypes,
+    detectedSchemaTypes,
+    scriptCount: Math.max(rawResult.scriptCount || 0, renderedResult.scriptCount || 0),
+    parsedScriptCount: Math.max(
+      rawResult.parsedScriptCount || 0,
+      renderedResult.parsedScriptCount || 0
+    ),
+    schemaObjectCount: Math.max(
+      rawResult.schemaObjectCount || 0,
+      renderedResult.schemaObjectCount || 0
+    ),
+    microdataTypes: normalizeSchemaTypes([
+      ...(rawResult.microdataTypes || []),
+      ...(renderedResult.microdataTypes || [])
+    ]).sort(),
+    microdataItemCount: Math.max(
+      rawResult.microdataItemCount || 0,
+      renderedResult.microdataItemCount || 0
+    ),
+    totalDetectedItems: Math.max(
+      rawResult.totalDetectedItems || 0,
+      renderedResult.totalDetectedItems || 0,
+      detectedSchemaTypes.length
+    ),
+    jsonLdErrors,
+    schemaParseErrors,
+    hasStructuredData: Boolean(
+      rawResult.hasStructuredData || renderedResult.hasStructuredData
+    ),
+    renderedMergeReason:
+      'Raw HTML lacked expected page-type schema, so rendered/app-injected schema was evaluated.'
+  };
+}
+
 async function extractStructuredDataForPage({ url, html, pageType }) {
   const effectivePageType = resolveSchemaPageType(url, pageType, html, cheerio.load(html));
   const rawResult = extractStructuredDataFromHtml(html, effectivePageType, url);
@@ -1508,11 +1814,7 @@ async function extractStructuredDataForPage({ url, html, pageType }) {
     `[structured-data:raw] ${url} pageType=${effectivePageType} scripts=${rawResult.scriptCount} parsed=${rawResult.parsedScriptCount} types=${rawResult.detectedSchemas.join(', ') || 'none'}`
   );
 
-  if (
-    rawResult.detectedSchemas.length > 0 ||
-    rawResult.microdataItemCount > 0 ||
-    rawResult.hasStructuredData
-  ) {
+  if (!shouldRunRenderedSchemaExtraction(rawResult, effectivePageType)) {
     return rawResult;
   }
 
@@ -1526,7 +1828,7 @@ async function extractStructuredDataForPage({ url, html, pageType }) {
       `[structured-data:puppeteer] ${url} pageType=${effectivePageType} scripts=${renderedResult.scriptCount} parsed=${renderedResult.parsedScriptCount} types=${renderedResult.detectedSchemas.join(', ') || 'none'}`
     );
 
-    return renderedResult;
+    return mergeStructuredDataResults(rawResult, renderedResult);
   }
 
   console.log(

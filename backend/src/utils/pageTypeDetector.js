@@ -21,7 +21,12 @@ function detectPageTypeFromUrl(url) {
     const lowerPath = path.toLowerCase();
 
     if (lowerPath === '/') return 'homepage';
-    if (lowerPath.startsWith('/products/')) return 'product';
+    if (
+      lowerPath.startsWith('/products/') ||
+      /\/collections\/[^/]+\/products\//.test(lowerPath)
+    ) {
+      return 'product';
+    }
     if (lowerPath.startsWith('/collections/')) return 'collection';
     if (lowerPath.startsWith('/blogs/')) return 'blog';
     if (lowerPath.startsWith('/pages/')) return 'page';

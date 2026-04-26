@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { normalizeSchemaTypes } = require('../utils/schemaTypes');
 
 function escapeXml(value) {
   return String(value ?? '')
@@ -43,10 +44,15 @@ function formatIssueForExport(issue) {
 }
 
 function getPageSchema(page) {
-  return page.schema || {
+  const schema = page.schema || {
     detected: (page.structuredData || {}).schemaTypes || [],
     count: (page.structuredData || {}).totalDetectedItems || 0,
     confidence: (page.structuredData || {}).confidence || 'low'
+  };
+
+  return {
+    ...schema,
+    detected: normalizeSchemaTypes(schema.detected || [])
   };
 }
 

@@ -1,4 +1,5 @@
 const { buildCoverageMap } = require('../utils/schemaRules');
+const { normalizeSchemaTypes } = require('../utils/schemaTypes');
 
 function normalizeField(value) {
   return (value || '').replace(/\s+/g, ' ').trim().toLowerCase();
@@ -289,7 +290,10 @@ function analyzeStructuredData(pages) {
 
   pages.forEach(page => {
     const structuredData = page.structuredData || {};
-    const schemaTypes = structuredData.schemaTypes || [];
+    const schemaTypes = normalizeSchemaTypes([
+      ...(structuredData.schemaTypes || []),
+      ...(structuredData.detectedSchemaTypes || [])
+    ]);
     const schemaTypeSet = new Set(schemaTypes);
     const jsonLdErrors = structuredData.jsonLdErrors || [];
 

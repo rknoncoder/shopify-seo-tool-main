@@ -1,3 +1,8 @@
+const {
+  hasAnySchemaType: hasAnyNormalizedSchemaType,
+  normalizeSchemaTypes
+} = require('./schemaTypes');
+
 const PAGE_SCHEMA_RULES = {
   homepage: {
     required: [
@@ -70,8 +75,7 @@ function getSchemaRules(pageType) {
 }
 
 function hasAnySchemaType(detectedTypes, expectedTypes) {
-  const typeSet = new Set(detectedTypes || []);
-  return expectedTypes.some(type => typeSet.has(type));
+  return hasAnyNormalizedSchemaType(detectedTypes, expectedTypes);
 }
 
 function listExpectedSchemaTypes(pageType) {
@@ -86,11 +90,12 @@ function listExpectedSchemaTypes(pageType) {
 
 function getMissingSchemaGroups(pageType, detectedTypes, breadcrumbUiPresent) {
   const rules = getSchemaRules(pageType);
+  const normalizedDetectedTypes = normalizeSchemaTypes(detectedTypes || []);
   const missingRequired = rules.required
-    .filter(rule => !hasAnySchemaType(detectedTypes, rule.anyOf))
+    .filter(rule => !hasAnySchemaType(normalizedDetectedTypes, rule.anyOf))
     .map(rule => rule.label);
   const missingRecommended = rules.recommended
-    .filter(rule => !hasAnySchemaType(detectedTypes, rule.anyOf))
+    .filter(rule => !hasAnySchemaType(normalizedDetectedTypes, rule.anyOf))
     .filter(rule => {
       if (rule.label === 'BreadcrumbList') {
         return pageType !== 'homepage' && breadcrumbUiPresent;
